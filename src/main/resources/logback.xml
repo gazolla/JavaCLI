@@ -47,7 +47,7 @@
     </appender>
     
     <!-- Logger específico para MCP -->
-    <logger name="com.gazapps.mcp" level="INFO" additivity="false">
+    <logger name="com.gazapps.mcp" level="DEBUG" additivity="false">
         <appender-ref ref="MCP_FILE"/>
         <appender-ref ref="ERROR_FILE"/>
     </logger>
@@ -59,7 +59,7 @@
     </logger>
     
     <!-- Root logger - APENAS ARQUIVOS -->
-    <root level="INFO">
+    <root level="DEBUG">
         <appender-ref ref="FILE"/>
         <appender-ref ref="ERROR_FILE"/>
     </root>

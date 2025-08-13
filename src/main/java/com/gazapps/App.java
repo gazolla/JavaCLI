@@ -26,7 +26,7 @@ public class App implements AutoCloseable {
         );
     
     public App() throws Exception {
-        this.chatEngine = ChatEngineBuilder.currentSetup(ChatEngineBuilder.LlmProvider.GROQ, ChatEngineBuilder.InferenceStrategy.TOOLUSE);
+        this.chatEngine = ChatEngineBuilder.currentSetup(ChatEngineBuilder.LlmProvider.GEMINI, ChatEngineBuilder.InferenceStrategy.TOOLUSE);
         this.scanner = new Scanner(System.in);
     }
     
@@ -89,8 +89,14 @@ public class App implements AutoCloseable {
     }
     
     private void runChatLoop() {
-        System.out.println("Type 'exit' to leave chat");
-        System.out.println("========================");
+        System.out.println(""" 
+        		
+        		Tips for getting started:
+        		1. Ask questions, edit files, or run commands.
+        		2. De specifie for the best results.
+        		3. /help far more information.
+        		""");
+        		
         
         while (true) {
             System.out.print("You: ");
