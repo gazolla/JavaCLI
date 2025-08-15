@@ -38,6 +38,9 @@ public class ToolUseInference implements Inference {
     private List<FunctionDeclaration> availableMcpTools;
     private ToolChain toolChain;
     private final Map<String, JsonNode> toolSchemaCache = new java.util.HashMap<>();
+    
+    // Dynamic Tool Matcher - substitui lógica hardcoded
+    private final DynamicToolMatcher dynamicMatcher = new DynamicToolMatcher();
 
     public ToolUseInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, Map<String, Object> options) {
         this.llmService = Objects.requireNonNull(llmService);
@@ -76,14 +79,42 @@ public class ToolUseInference implements Inference {
     private String analyzeQuery(String query) {
         String queryLower = query.toLowerCase();
         
+        // PASSO 1: Detectar complexidade da query PRIMEIRO
+        boolean isComplexQuery = detectQueryComplexity(queryLower);
+        
+        if (debugMode) {
+            logger.debug("[TOOLUSE] Query complexity analysis: '{}' | Complex: {}", query, isComplexQuery);
+        }
+        
+        // PASSO 2: Para queries complexas, ir direto para análise LLM
+        if (isComplexQuery) {
+            if (debugMode) {
+                logger.debug("[TOOLUSE] Complex query detected - using LLM analysis");
+            }
+            return analyzeComplexQuery(query);
+        }
+        
+        // PASSO 3: Para queries simples, tentar single tool matching primeiro
         if (availableMcpTools != null) {
             for (FunctionDeclaration tool : availableMcpTools) {
                 String description = tool.description.toLowerCase();
-                if (isQueryMatchingTool(queryLower, description, tool.name)) {
+                DynamicToolMatcher.MatchResult result = dynamicMatcher.matchesWithDetails(
+                    queryLower, description, tool.name, 
+                    mcpServers.getServerForTool(tool.name), 
+                    getToolSchemaMap(tool.name)
+                );
+                
+                if (result.matches && !result.isComplex) {
+                    if (debugMode) {
+                        logger.debug("[TOOLUSE] Simple single tool match: {} (confidence: {:.3f})", 
+                                    tool.name, result.confidence);
+                    }
                     return "USE_TOOL:" + tool.name;
                 }
             }
         }
+        
+        // PASSO 4: Fallback para análise LLM se não encontrou single tool
         
         StringBuilder prompt = new StringBuilder();
         prompt.append("Analyze this user query and determine if tools are needed.\n\n");
@@ -106,54 +137,129 @@ public class ToolUseInference implements Inference {
         return llmService.generateResponse(prompt.toString(), null);
     }
     
+    /**
+     * Detecta se uma query é complexa (requer múltiplas ferramentas)
+     */
+    private boolean detectQueryComplexity(String queryLower) {
+        // Contar domínios/intenções diferentes
+        int intentCount = 0;
+        
+        // Intenção 1: Criar/escrever arquivos
+        if (queryLower.matches(".*(?:crie|create|arquivo|file|write|escreva|salve|save).*")) {
+            intentCount++;
+        }
+        
+        // Intenção 2: Obter dados (clima, notícias, etc.)
+        if (queryLower.matches(".*(?:dados|data|clima|weather|notícias|news|informações|info).*")) {
+            intentCount++;
+        }
+        
+        // Intenção 3: Com base em localização
+        if (queryLower.matches(".*(?:em|in|de|from|para|to)\\s+[A-ZÀ-Ý][a-zà-ý]+.*")) {
+            intentCount++;
+        }
+        
+        // Palavras que indicam combinação de ações
+        boolean hasConjunctions = queryLower.matches(".*(?:com|with|e|and|usando|using|baseado|based).*");
+        
+        // Complexa se: múltiplas intenções OU conjunções com pelo menos 1 intenção
+        return intentCount > 1 || (intentCount >= 1 && hasConjunctions);
+    }
+    
+    /**
+     * Análise LLM para queries complexas (priorizando tool chains)
+     */
+    private String analyzeComplexQuery(String query) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Complex query analysis - determine optimal tool strategy.\n\n");
+        prompt.append("Query: ").append(query).append("\n\n");
+        
+        // CRÍTICO: Distinção clara entre AÇÃO vs EXPLICAÇÃO
+        prompt.append("CRITICAL: This query requires IMMEDIATE TOOL EXECUTION, not explanation.\n");
+        prompt.append("User wants you to PERFORM the action, not describe how to do it.\n");
+        prompt.append("You MUST respond with TOOL_CHAIN format for action queries.\n\n");
+        
+        // KISS FIX: Gentle guidance para tool chains (mantém genericidade)
+        prompt.append("Note: Complex queries often involve sequential steps:\n");
+        prompt.append("- Getting data → Using that data\n");
+        prompt.append("- Creating content → Saving to location\n");
+        prompt.append("- Processing → Outputting results\n\n");
+        
+        prompt.append("Available tools:\n");
+        if (availableMcpTools != null) {
+            for (FunctionDeclaration tool : availableMcpTools) {
+                prompt.append("- ").append(tool.name).append(": ").append(tool.description).append("\n");
+            }
+        }
+        
+        prompt.append("\nFor complex queries requiring multiple tools, respond with:\n");
+        prompt.append("- 'TOOL_CHAIN:tool1,tool2,tool3' if multiple tools needed in sequence\n");
+        prompt.append("- 'USE_TOOL:tool_name' if only one tool needed\n");
+        prompt.append("- 'DIRECT_RESPONSE' if no tools needed\n\n");
+        
+        // MANDATORY: Exemplos específicos de ação vs explicação
+        prompt.append("MANDATORY ACTION PATTERNS (respond with TOOL_CHAIN):\n");
+        prompt.append("- \"create file X with Y\" → TOOL_CHAIN:content_tool,filesystem_write_file\n");
+        prompt.append("- \"save file to location\" → TOOL_CHAIN:filesystem_write_file\n");
+        prompt.append("- \"write code to file\" → TOOL_CHAIN:filesystem_write_file\n");
+        prompt.append("- \"get data and save\" → TOOL_CHAIN:data_tool,filesystem_write_file\n\n");
+        
+        // KISS ADD: Pattern examples (genérico mas orientativo)
+        prompt.append("General patterns:\n");
+        prompt.append("- \"create X with Y data\" → likely needs: data_tool,create_tool\n");
+        prompt.append("- \"save Z from source\" → likely needs: fetch_tool,save_tool\n");
+        prompt.append("- \"file with content from location\" → likely needs: location_tool,file_tool\n");
+        
+        return llmService.generateResponse(prompt.toString(), null);
+    }
+    
+    /**
+     * Converte JsonNode schema para Map (helper method)
+     */
+    private Map<String, Object> getToolSchemaMap(String toolName) {
+        JsonNode schema = getToolSchema(toolName);
+        if (schema != null) {
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> converted = objectMapper.convertValue(schema, Map.class);
+                return converted;
+            } catch (Exception e) {
+                if (debugMode) {
+                    logger.warn("[TOOLUSE] Error converting schema for tool {}: {}", toolName, e.getMessage());
+                }
+            }
+        }
+        return null;
+    }
+    
     private boolean isQueryMatchingTool(String queryLower, String description, String toolName) {
-        // Time operations - PRIORITY FIX
-        if (queryLower.contains("hora") || queryLower.contains("time") || queryLower.contains("horário") ||
-            queryLower.contains("dia") || queryLower.contains("date") || queryLower.contains("quando")) {
-            return description.contains("time") || description.contains("timezone");
-        }
+        // Buscar informações do servidor e schema da ferramenta
+        String serverName = mcpServers.getServerForTool(toolName);
+        JsonNode toolSchema = getToolSchema(toolName);
         
-        // RSS/Feed/News operations - PRIORITY FIX
-        if (queryLower.contains("feed") || queryLower.contains("rss") || queryLower.contains("notícias") ||
-            queryLower.contains("manchetes") || queryLower.contains("news") || 
-            (queryLower.contains("mostre") && (queryLower.contains(".com") || queryLower.contains("site")))) {
-            return description.contains("feed") || description.contains("rss");
-        }
-        
-        // Weather operations
-        if (queryLower.contains("clima") || queryLower.contains("weather") || 
-            queryLower.contains("tempo") || queryLower.contains("temperatura")) {
-            if (toolName.toLowerCase().contains("forecast")) {
-                return description.contains("forecast") || description.contains("weather");
+        // Converter schema para Map se existir
+        Map<String, Object> schemaMap = null;
+        if (toolSchema != null) {
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> converted = objectMapper.convertValue(toolSchema, Map.class);
+                schemaMap = converted;
+            } catch (Exception e) {
+                if (debugMode) {
+                    logger.warn("[TOOLUSE] Error converting schema for tool {}: {}", toolName, e.getMessage());
+                }
             }
-            if (queryLower.contains("alert") || queryLower.contains("aviso")) {
-                return toolName.toLowerCase().contains("alert");
-            }
-            return false;
         }
         
-        // File operations
-        if (queryLower.contains("liste") || queryLower.contains("listar") || queryLower.contains("list")) {
-            return toolName.toLowerCase().contains("list_directory") && description.contains("list") && description.contains("directory");
+        // Delegar para o matcher dinâmico
+        boolean matches = dynamicMatcher.matches(queryLower, description, toolName, serverName, schemaMap);
+        
+        if (debugMode) {
+            logger.debug("[TOOLUSE] Dynamic matching - Query: '{}' | Tool: '{}' | Server: '{}' | Match: {}", 
+                        queryLower, toolName, serverName, matches);
         }
         
-        if (queryLower.contains("crie") || queryLower.contains("create") || queryLower.contains("arquivo")) {
-            return toolName.toLowerCase().contains("write") && 
-                   (description.contains("create") || description.contains("write")) && 
-                   description.contains("file");
-        }
-        
-        if (queryLower.contains("leia") || queryLower.contains("read") || queryLower.contains("abrir")) {
-            return toolName.toLowerCase().contains("read_file") && 
-                   description.contains("read") && description.contains("file");
-        }
-        
-        // Knowledge graph operations
-        if (queryLower.contains("entidade") || queryLower.contains("entity") || queryLower.contains("conhecimento")) {
-            return description.contains("entity") || description.contains("knowledge") || description.contains("graph");
-        }
-        
-        return false;
+        return matches;
     }
 
     private boolean requiresToolExecution(String analysisResult) {
@@ -218,8 +324,13 @@ public class ToolUseInference implements Inference {
                 execution = toolChain.execute(toolName, parameters);
                 
                 if (execution.isSuccess()) {
-                    return execution;
-                }
+                // Registrar sucesso para aprendizado
+                    dynamicMatcher.recordResult(toolName, true);
+            return execution;
+        } else {
+            // Registrar falha para aprendizado
+            dynamicMatcher.recordResult(toolName, false);
+        }
                 
                 if (!isParameterValidationError(execution.getError())) {
                     break;
@@ -571,17 +682,33 @@ public class ToolUseInference implements Inference {
     public ToolChain getToolChain() {
         return toolChain;
     }
+    
+    /**
+     * Acesso ao matcher dinâmico para debugging e testing
+     */
+    public DynamicToolMatcher getDynamicMatcher() {
+        return dynamicMatcher;
+    }
 
     @Override
     public String buildSystemPrompt() {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("ToolUse Inference - LLM-driven intelligent tool selection and execution\n");
+        prompt.append("ToolUse Inference - Dynamic, Language-Agnostic Tool Matching with Complex Query Support\n");
         prompt.append("Available tools: ").append(availableMcpTools != null ? availableMcpTools.size() : 0).append("\n");
+        prompt.append("Dynamic matcher: enabled (100% based on MCP metadata)\n");
+        prompt.append("Language support: universal (entity-based matching)\n");
+        prompt.append("Complex query detection: enabled (automatic tool chain detection)\n");
         prompt.append("Auto-retry with error correction: enabled (max retries: ").append(MAX_RETRIES).append(")\n");
         prompt.append("Default timezone: ").append(DEFAULT_TIMEZONE).append("\n");
         if (enableToolChaining) {
             prompt.append("Tool chaining: enabled (max length: ").append(maxToolChainLength).append(")\n");
         }
+        
+        // Adicionar estatísticas do matcher
+        Map<String, Object> matcherStats = dynamicMatcher.getStats();
+        prompt.append("Learning stats: ").append(matcherStats.get("toolsLearned")).append(" tools learned, ")
+              .append(String.format("%.2f", matcherStats.get("averageSuccessRate"))).append(" avg success rate\n");
+        
         return prompt.toString();
     }
 
@@ -591,5 +718,7 @@ public class ToolUseInference implements Inference {
         if (availableMcpTools != null) {
             availableMcpTools.clear();
         }
+        // Manter histórico de aprendizado do matcher (não limpar na close)
+        logger.info("[TOOLUSE] ToolUseInference closed. Dynamic matcher stats: {}", dynamicMatcher.getStats());
     }
 }
