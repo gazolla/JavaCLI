@@ -16,8 +16,14 @@ public class ChatEngine implements AutoCloseable {
     private final Llm llmService;
     private final Inference inference;
     private final ConversationMemory memory;
+    private MCPServers mcpServers;
     
-    public ChatEngine(Llm llmService, Inference inference, ConversationMemory memory) {
+	public ChatEngine(Llm llmService, Inference inference, ConversationMemory memory, MCPServers mcpServers) {
+        this(llmService, inference, memory);
+        this.mcpServers = mcpServers;
+    }
+
+	public ChatEngine(Llm llmService, Inference inference, ConversationMemory memory) {
         this.llmService = llmService;
         this.inference = inference;
         this.memory = memory;
@@ -75,6 +81,10 @@ public class ChatEngine implements AutoCloseable {
         return memory;
     }
     
+    public MCPServers getMcpServers() {
+		return mcpServers;
+	}
+
     @Override
     public void close() {
     	

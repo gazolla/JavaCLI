@@ -11,6 +11,8 @@ import com.gazapps.commands.CommandProcessor;
 import com.gazapps.commands.CommandResult;
 import com.gazapps.config.Config;
 import com.gazapps.config.RuntimeConfigManager;
+import com.gazapps.config.EnvironmentSetup;
+import com.gazapps.exceptions.ConfigurationException;
 import com.gazapps.core.ChatEngine;
 import com.gazapps.core.ChatEngineBuilder;
 import com.gazapps.exceptions.ErrorMessageHandler;
@@ -33,14 +35,14 @@ public class App implements AutoCloseable {
     public App() throws Exception {
         this.configManager = new RuntimeConfigManager();
         this.chatEngine = ChatEngineBuilder.currentSetup(ChatEngineBuilder.LlmProvider.GROQ, ChatEngineBuilder.InferenceStrategy.TOOLUSE);
-        this.commandProcessor = new CommandProcessor(chatEngine, configManager);
+        this.commandProcessor = new CommandProcessor(chatEngine, configManager, this.chatEngine.getMcpServers());
         this.scanner = new Scanner(System.in);
     }
     
     public App(ChatEngine chatEngine) {
         this.configManager = new RuntimeConfigManager();
         this.chatEngine = chatEngine;
-        this.commandProcessor = new CommandProcessor(chatEngine, configManager);
+        this.commandProcessor = new CommandProcessor(chatEngine, configManager, this.chatEngine.getMcpServers());
         this.scanner = new Scanner(System.in);
     }
     
@@ -54,17 +56,32 @@ public class App implements AutoCloseable {
             chatEngine.close();
         }
         
+        // Cleanup environment setup resources
+        EnvironmentSetup.cleanup();
+        
         System.exit(0);
     }
     
 	public static void main(String[] args) throws Exception {
-		Config config = new Config();
+		starting();
+		
+		if (!EnvironmentSetup.ensureApiKeysConfigured()) {
+            throw new ConfigurationException("Application cannot start without API key configuration");
+	    }
+        
+        Config config = new Config();
 		config.createConfigStructure();
 
 		try (App app = new App()) {
-			app.showEnhancedBanner();
+			app.showSystemStarted();
 			app.runChatLoop();
 		}
+	}
+
+	private static void starting() throws IOException {
+		String banner = FigletFont.convertOneLine("Java CLI");
+        System.out.println(banner);
+        System.out.println("Starting...");
 	}
  
     private String handleChatQuery(String query) throws Exception {
@@ -139,22 +156,19 @@ public class App implements AutoCloseable {
         logger.info("Chat ended!");
     }
     
-    private void showEnhancedBanner() throws IOException {
-        String banner = FigletFont.convertOneLine("Java CLI");
-        System.out.println(banner);
+    private void showSystemStarted() throws IOException {
         
-        System.out.println("Starting...");
         
         try {
             String llmProvider = chatEngine.getLLMService().getProviderName();
             String inferenceStrategy = chatEngine.getInference().getClass().getSimpleName();
             
-            System.out.printf("✅ %s configurado corretamente%n", llmProvider);
-            System.out.println("🔧 MCP servers conectados");
-            System.out.printf("🧠 Estratégia: %s%n", inferenceStrategy);
+            System.out.printf("✅ %s configured%n", llmProvider);
+            System.out.println("🔧 MCP servers connected");
+            System.out.printf("🧠 Strategy: %s%n", inferenceStrategy);
             
         } catch (Exception e) {
-            System.out.println("✅ Sistema configurado");
+            System.out.println("Something went wrong...");
         }
         
         System.out.println("""

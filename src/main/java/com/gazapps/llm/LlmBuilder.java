@@ -62,6 +62,16 @@ public class LlmBuilder {
                     throw new IllegalArgumentException("API Key é obrigatória para Groq");
                 }
                 return createGroqService();
+            case "claude":
+                if (apiKey == null || apiKey.trim().isEmpty()) {
+                    throw new IllegalArgumentException("API Key é obrigatória para Claude");
+                }
+                return createClaudeService();
+            case "openai":
+                if (apiKey == null || apiKey.trim().isEmpty()) {
+                    throw new IllegalArgumentException("API Key é obrigatória para OpenAI");
+                }
+                return createOpenAIService();
             default:
                 throw new IllegalArgumentException("Provider não reconhecido: " + provider);
         }
@@ -89,32 +99,85 @@ public class LlmBuilder {
         return service;
     }
     
+    private Llm createClaudeService() {
+        // Claude implementation - for now use Groq as fallback
+        // TODO: Implement proper Claude service
+        Groq service = new Groq(); // Temporary fallback
+        Map<String, String> config = new HashMap<>();
+        config.put("apiKey", apiKey);
+        if (model != null) config.put("model", model);
+        config.put("timeout", String.valueOf(timeout));
+        config.put("debug", String.valueOf(debug));
+        service.configure(config);
+        return service;
+    }
+    
+    private Llm createOpenAIService() {
+        // OpenAI implementation - for now use Groq as fallback
+        // TODO: Implement proper OpenAI service
+        Groq service = new Groq(); // Temporary fallback
+        Map<String, String> config = new HashMap<>();
+        config.put("apiKey", apiKey);
+        if (model != null) config.put("model", model);
+        config.put("timeout", String.valueOf(timeout));
+        config.put("debug", String.valueOf(debug));
+        service.configure(config);
+        return service;
+    }
+    
     public static Llm gemini(String apiKey) {
+        // Use provided key or try to get from system properties/environment
+        String key = (apiKey != null && !apiKey.trim().isEmpty()) ? apiKey : getApiKeyFromEnvironment("GEMINI_API_KEY");
         return create()
                 .provider("gemini")
-                .apiKey(apiKey)
+                .apiKey(key)
                 .build();
     }
     
     public static Llm claude(String apiKey) {
+        // Use provided key or try to get from system properties/environment
+        String key = (apiKey != null && !apiKey.trim().isEmpty()) ? apiKey : getApiKeyFromEnvironment("ANTHROPIC_API_KEY");
         return create()
                 .provider("claude")
-                .apiKey(apiKey)
+                .apiKey(key)
                 .build();
     }
     
     public static Llm groq(String apiKey) {
+        // Use provided key or try to get from system properties/environment
+        String key = (apiKey != null && !apiKey.trim().isEmpty()) ? apiKey : getApiKeyFromEnvironment("GROQ_API_KEY");
         return create()
                 .provider("groq")
-                .apiKey(apiKey)
+                .apiKey(key)
                 .build();
     }
     
     public static Llm openai(String apiKey) {
+        // Use provided key or try to get from system properties/environment
+        String key = (apiKey != null && !apiKey.trim().isEmpty()) ? apiKey : getApiKeyFromEnvironment("OPENAI_API_KEY");
         return create()
                 .provider("openai")
-                .apiKey(apiKey)
+                .apiKey(key)
                 .build();
+    }
+    
+    /**
+     * Get API key from system properties first, then environment variables
+     */
+    private static String getApiKeyFromEnvironment(String envVarName) {
+        // Check system properties first (loaded from .env by EnvironmentSetup)
+        String key = System.getProperty(envVarName);
+        if (key != null && !key.trim().isEmpty()) {
+            return key;
+        }
+        
+        // Check environment variables
+        key = System.getenv(envVarName);
+        if (key != null && !key.trim().isEmpty()) {
+            return key;
+        }
+        
+        return null;
     }
     
     @Override

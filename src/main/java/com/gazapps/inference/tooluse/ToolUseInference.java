@@ -312,7 +312,15 @@ public class ToolUseInference implements Inference {
         // File operations
         if (toolName.contains("write") || toolName.contains("create") || toolName.contains("file")) {
             prompt.append("FILE OPERATIONS:\n");
-            prompt.append("- Use Windows paths: C:\\\\Users\\\\gazol\\\\Documents\\\\filename.ext\n");
+            // Get current workspace path dynamically
+            String workspacePath = com.gazapps.config.EnvironmentSetup.getExpandedWorkspacePath();
+            if (workspacePath != null) {
+                prompt.append("- REQUIRED: Use FULL workspace path: ").append(workspacePath).append("\n");
+                prompt.append("- For file 'example.txt' use: ").append(workspacePath).append("\\example.txt\n");
+                prompt.append("- NEVER use relative paths - always include full workspace path\n");
+            } else {
+                prompt.append("- Use current directory for file operations\n");
+            }
             prompt.append("- Generate relevant content based on the request\n\n");
         }
         

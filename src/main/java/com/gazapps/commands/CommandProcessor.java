@@ -7,9 +7,15 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.gazapps.config.EnvironmentSetup;
 import com.gazapps.config.RuntimeConfigManager;
 import com.gazapps.core.ChatEngine;
 import com.gazapps.core.ChatEngineBuilder;
+import com.gazapps.exceptions.ConfigurationException;
+import com.gazapps.mcp.MCPServers;
+
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpSchema.ListToolsResult;
 
 public class CommandProcessor {
     private static final Logger logger = LoggerFactory.getLogger(CommandProcessor.class);
@@ -20,12 +26,19 @@ public class CommandProcessor {
     
     private ChatEngine currentChatEngine;
     private final RuntimeConfigManager configManager;
+    private MCPServers mcpServers;
+    
+    public CommandProcessor(ChatEngine chatEngine, RuntimeConfigManager configManager, MCPServers mcpServers) {
+    	this(chatEngine, configManager);
+        this.mcpServers = mcpServers;
+    }
     
     public CommandProcessor(ChatEngine chatEngine, RuntimeConfigManager configManager) {
         this.currentChatEngine = chatEngine;
         this.configManager = configManager;
     }
     
+     
     public CommandResult processCommand(String input) {
         try {
             if (!isCommand(input)) {
@@ -47,6 +60,7 @@ public class CommandProcessor {
                 case "help" -> handleHelpCommand();
                 case "status" -> handleStatusCommand();
                 case "tools" -> handleToolsCommand();
+                case "workspace" -> handleWorkspaceCommand(parameter);
                 default -> CommandResult.error("Unknown command: " + command + "\nType /help for available commands");
             };
             
@@ -78,6 +92,20 @@ public class CommandProcessor {
         }
         
         try {
+            // Check if provider is configured
+            if (!EnvironmentSetup.isProviderConfigured(provider)) {
+                logger.info("Provider {} not configured, offering inline setup", provider);
+                
+                try {
+                    if (!EnvironmentSetup.setupProviderInline(provider)) {
+                        return CommandResult.error("❌ Configuration cancelled. Cannot switch to " + provider + ".");
+                    }
+                } catch (ConfigurationException e) {
+                    logger.error("Inline configuration failed: {}", e.getMessage());
+                    return CommandResult.error("❌ Failed to configure " + provider + ": " + e.getUserFriendlyMessage());
+                }
+            }
+            
             logger.info("Attempting to change LLM to: {}", provider);
             
             ChatEngineBuilder.LlmProvider llmProvider = ChatEngineBuilder.LlmProvider.valueOf(provider.toUpperCase());
@@ -180,20 +208,184 @@ public class CommandProcessor {
     
     private CommandResult handleToolsCommand() {
         try {
-            // This would need to be implemented to list MCP tools
-            return CommandResult.success("""
-                🔧 Available MCP Tools:
-                📁 Filesystem operations (read, write, list, search)
-                🌤️ Weather forecasts and alerts
-                📰 RSS feed parsing
-                🕐 Date/time operations
-                💾 Memory/knowledge graph operations
+            StringBuilder toolsList = new StringBuilder();
+            toolsList.append("🔧 Available MCP Tools:\n\n");
+            
+            this.mcpServers.getConnectedServers().forEach(server -> {
+                McpSyncClient client = mcpServers.getClient(server.name);
+                ListToolsResult toolsResult = client.listTools();
                 
-                Use these tools by asking natural language questions!""");
+                toolsList.append("🖥️ Server: ").append(server.name).append("\n");
                 
+                toolsResult.tools().forEach(tool -> {
+                    toolsList.append("  • ").append(tool.name())
+                           // .append(" - ").append(tool.description())
+                            .append("\n");
+                });
+                
+                toolsList.append("\n");
+                logger.info("Retrieved tools from MCP server: {}", server.name);
+            });
+            
+            if (this.mcpServers.getConnectedServers().isEmpty()) {
+                toolsList.append("⚠️ No MCP servers currently connected\n");
+            } else if (toolsList.toString().equals("🔧 Available MCP Tools:\n\n")) {
+                toolsList.append("ℹ️ No tools available on connected servers\n");
+            }
+            
+            toolsList.append("\nUse these tools by asking natural language questions!");
+            
+            return CommandResult.success(toolsList.toString());
+            
         } catch (Exception e) {
-            logger.error("Failed to list tools: {}", e.getMessage());
-            return CommandResult.error("❌ Failed to retrieve tools list");
+            logger.error("Failed to list tools: {}", e.getMessage(), e);
+            return CommandResult.error("❌ Failed to retrieve tools list: " + e.getMessage());
+        }
+    }
+    
+    private CommandResult handleWorkspaceCommand(String parameter) {
+        try {
+            // If no parameter, show current workspace status
+            if (parameter == null || parameter.trim().isEmpty()) {
+                StringBuilder status = new StringBuilder();
+                status.append("📁 MCP Workspace Status:\n\n");
+                
+                String currentPath = EnvironmentSetup.getCurrentWorkspacePath();
+                if (currentPath != null) {
+                    String expandedPath = EnvironmentSetup.getExpandedWorkspacePath();
+                    status.append("✅ Configured: ").append(currentPath).append("\n");
+                    status.append("📂 Resolved: ").append(expandedPath).append("\n");
+                    
+                    if (EnvironmentSetup.isWorkspaceConfigured()) {
+                        status.append("✅ Status: Active and accessible\n");
+                    } else {
+                        status.append("❌ Status: Path not accessible\n");
+                    }
+                } else {
+                    status.append("❌ Not configured\n");
+                }
+                
+                status.append("\n📝 Commands:\n");
+                status.append("  /workspace setup    - Configure new workspace\n");
+                status.append("  /workspace check    - Validate current workspace\n");
+                status.append("  /workspace          - Show this status\n");
+                
+                return CommandResult.success(status.toString());
+            }
+            
+            // Handle subcommands
+            String subcommand = parameter.trim().toLowerCase();
+            
+            switch (subcommand) {
+                case "setup":
+                    return handleWorkspaceSetup();
+                case "check":
+                    return handleWorkspaceCheck();
+                default:
+                    return CommandResult.error(String.format("""
+                        ❌ Unknown workspace command '%s'
+                        Available commands:
+                          /workspace setup    - Configure new workspace
+                          /workspace check    - Validate current workspace
+                          /workspace          - Show workspace status""", subcommand));
+            }
+            
+        } catch (Exception e) {
+            logger.error("Workspace command failed: {}", e.getMessage(), e);
+            return CommandResult.error("❌ Failed to process workspace command: " + e.getMessage());
+        }
+    }
+    
+    private CommandResult handleWorkspaceSetup() {
+        try {
+            System.out.println("\n🔧 Starting workspace reconfiguration...");
+            
+            if (EnvironmentSetup.setupWorkspace()) {
+                return CommandResult.success("""
+                    ✅ Workspace reconfigured successfully!
+                    🔄 Please restart JavaCLI for MCP servers to use the new workspace.
+                    
+                    💡 Why restart? MCP servers load workspace at startup and need
+                       to be reinitialized to access the new folder.
+                    
+                    🚀 Just close and run JavaCLI again - your settings are saved!""");
+            } else {
+                return CommandResult.error("❌ Workspace setup cancelled or failed.");
+            }
+            
+        } catch (Exception e) {
+            logger.error("Workspace setup failed: {}", e.getMessage(), e);
+            return CommandResult.error("❌ Workspace setup failed: " + e.getMessage());
+        }
+    }
+    
+    private CommandResult handleWorkspaceCheck() {
+        try {
+            StringBuilder result = new StringBuilder();
+            result.append("🔍 Workspace Validation:\n\n");
+            
+            String currentPath = EnvironmentSetup.getCurrentWorkspacePath();
+            if (currentPath == null) {
+                result.append("❌ No workspace configured\n");
+                result.append("Run '/workspace setup' to configure one.\n");
+                return CommandResult.success(result.toString());
+            }
+            
+            result.append("📁 Configured Path: ").append(currentPath).append("\n");
+            
+            String expandedPath = EnvironmentSetup.getExpandedWorkspacePath();
+            result.append("📂 Expanded Path: ").append(expandedPath).append("\n\n");
+            
+            // Check if workspace is properly configured
+            if (EnvironmentSetup.isWorkspaceConfigured()) {
+                result.append("✅ Workspace is properly configured and accessible\n");
+                
+                // Additional validation
+                try {
+                    java.nio.file.Path path = java.nio.file.Paths.get(expandedPath);
+                    if (java.nio.file.Files.exists(path)) {
+                        result.append("✅ Directory exists\n");
+                    }
+                    if (java.nio.file.Files.isReadable(path)) {
+                        result.append("✅ Directory is readable\n");
+                    }
+                    if (java.nio.file.Files.isWritable(path)) {
+                        result.append("✅ Directory is writable\n");
+                    }
+                } catch (Exception e) {
+                    result.append("❌ Error checking directory: ").append(e.getMessage()).append("\n");
+                }
+                
+            } else {
+                result.append("❌ Workspace validation failed\n");
+                result.append("Issues found:\n");
+                
+                try {
+                    java.nio.file.Path path = java.nio.file.Paths.get(expandedPath);
+                    if (!java.nio.file.Files.exists(path)) {
+                        result.append("  ❌ Directory does not exist\n");
+                    }
+                    if (!java.nio.file.Files.isDirectory(path)) {
+                        result.append("  ❌ Path is not a directory\n");
+                    }
+                    if (!java.nio.file.Files.isReadable(path)) {
+                        result.append("  ❌ Directory is not readable\n");
+                    }
+                    if (!java.nio.file.Files.isWritable(path)) {
+                        result.append("  ❌ Directory is not writable\n");
+                    }
+                } catch (Exception e) {
+                    result.append("  ❌ Error accessing path: ").append(e.getMessage()).append("\n");
+                }
+                
+                result.append("\nRun '/workspace setup' to reconfigure.\n");
+            }
+            
+            return CommandResult.success(result.toString());
+            
+        } catch (Exception e) {
+            logger.error("Workspace check failed: {}", e.getMessage(), e);
+            return CommandResult.error("❌ Workspace check failed: " + e.getMessage());
         }
     }
     
@@ -213,12 +405,17 @@ public class CommandProcessor {
                  Strategies: sequential, react, tooluse
                  Example: /inference react
                
+               /workspace [command]   - Manage MCP workspace
+                 Commands: setup, check
+                 Example: /workspace setup
+               
                /config               - Show current configuration
                /help                 - Show this help
             
             📊 Status Commands:
                /status               - System status and performance
                /tools                - List available MCP tools
+               /workspace            - Show workspace status
             
             🚪 Exit Commands:
                exit, quit, bye, sair, tchau
@@ -227,10 +424,14 @@ public class CommandProcessor {
                - Be specific in your requests
                - Use tools for file operations, weather, time, etc.
                - Configuration changes preserve your conversation history
+               - MCP filesystem server uses your configured workspace
             
             Example session:
                You: /llm gemini
                🤖: ✅ LLM changed to Gemini (2.0 Flash)
+               
+               You: /workspace setup
+               🤖: [Interactive workspace configuration]
                
                You: What's the weather like?
                🤖: [Uses weather tools to get forecast]""");

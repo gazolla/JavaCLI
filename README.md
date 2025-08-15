@@ -26,16 +26,21 @@ JavaCLI is a command-line chatbot that combines multiple LLM providers with exte
 - 🔧 **MCP Integration**: Filesystem, Weather, RSS, Memory tools
 - ⚡ **Interactive CLI**: Real-time chat with performance metrics
 - 🏗️ **Modular Architecture**: Clean, extensible design
+- 🎛️ **Environment Wizard**: Automatic API key setup and configuration
+- 🔄 **Hot-Swap**: Change LLM providers and strategies on-the-fly
 
 ### 🎯 Quick Start
 
 ```bash
-# Set your API key
-export GROQ_API_KEY="your_api_key_here"
+# No API key? No problem! The Environment Wizard will guide you
+java -jar JavaCLI.jar
 
-# Run the application
+# Or if you prefer manual setup:
+export GROQ_API_KEY="your_api_key_here"
 mvn exec:java -Dexec.mainClass="com.gazapps.App"
 ```
+
+> 💡 **New to JavaCLI?** The built-in Environment Wizard will automatically guide you through API key setup on first run!
 
 ---
 
