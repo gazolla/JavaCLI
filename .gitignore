@@ -20,7 +20,7 @@ target/
 # =============================================================================
 
 # Configuration files (may contain sensitive data like API keys)
-config/
+
 
 # Log files and directories
 log/

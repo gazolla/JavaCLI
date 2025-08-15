@@ -11,7 +11,6 @@ import com.gazapps.config.EnvironmentSetup;
 import com.gazapps.config.RuntimeConfigManager;
 import com.gazapps.core.ChatEngine;
 import com.gazapps.core.ChatEngineBuilder;
-import com.gazapps.exceptions.ConfigurationException;
 import com.gazapps.mcp.MCPServers;
 
 import io.modelcontextprotocol.client.McpSyncClient;
@@ -96,14 +95,9 @@ public class CommandProcessor {
             if (!EnvironmentSetup.isProviderConfigured(provider)) {
                 logger.info("Provider {} not configured, offering inline setup", provider);
                 
-                try {
-                    if (!EnvironmentSetup.setupProviderInline(provider)) {
-                        return CommandResult.error("❌ Configuration cancelled. Cannot switch to " + provider + ".");
-                    }
-                } catch (ConfigurationException e) {
-                    logger.error("Inline configuration failed: {}", e.getMessage());
-                    return CommandResult.error("❌ Failed to configure " + provider + ": " + e.getUserFriendlyMessage());
-                }
+                if (!EnvironmentSetup.setupProviderInline(provider)) {
+				    return CommandResult.error("❌ Configuration cancelled. Cannot switch to " + provider + ".");
+				}
             }
             
             logger.info("Attempting to change LLM to: {}", provider);
