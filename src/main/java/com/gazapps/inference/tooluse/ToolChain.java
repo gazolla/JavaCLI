@@ -19,22 +19,20 @@ public class ToolChain {
     private final MCPService mcpService;
     private final MCPServers mcpServers;
     private final List<ToolExecution> executions;
-    private final boolean debugMode;
+
     
-    public ToolChain(MCPService mcpService, MCPServers mcpServers, boolean debugMode) {
+    public ToolChain(MCPService mcpService, MCPServers mcpServers) {
         this.mcpService = mcpService;
         this.mcpServers = mcpServers;
         this.executions = new ArrayList<>();
-        this.debugMode = debugMode;
     }
     
     public ToolExecution execute(String toolName, Map<String, Object> arguments) {
         long startTime = System.currentTimeMillis();
         
         try {
-            if (debugMode) {
-                logger.info("[TOOLCHAIN] Executing: {}({})", toolName, arguments);
-            }
+            logger.info("[TOOLCHAIN] Executing: {}({})", toolName, arguments);
+
             
             String serverName = mcpServers.getServerForTool(toolName);
             McpSyncClient client = mcpServers.getClient(serverName);
@@ -44,10 +42,7 @@ public class ToolChain {
             long executionTime = System.currentTimeMillis() - startTime;
             ToolExecution execution = ToolExecution.success(toolName, arguments, result, executionTime);
             executions.add(execution);
-            
-            if (debugMode) {
-                logger.info("[TOOLCHAIN] Success: {} ({}ms)", toolName, executionTime);
-            }
+            logger.info("[TOOLCHAIN] Success: {} ({}ms)", toolName, executionTime);
             
             return execution;
             
@@ -56,11 +51,8 @@ public class ToolChain {
             String error = "Tool execution failed: " + e.getMessage();
             ToolExecution execution = ToolExecution.failure(toolName, arguments, error, executionTime);
             executions.add(execution);
-            
-            if (debugMode) {
-                logger.warn("[TOOLCHAIN] Failed: {} - {} ({}ms)", toolName, error, executionTime);
-            }
-            
+            logger.error("[TOOLCHAIN] Failed: {} - {} ({}ms)", toolName, error, executionTime);
+
             return execution;
         }
     }
@@ -74,9 +66,7 @@ public class ToolChain {
             
             // Stop on failure if configured to do so
             if (!execution.isSuccess()) {
-                if (debugMode) {
-                    logger.warn("[TOOLCHAIN] Stopping chain due to failure: {}", execution.getError());
-                }
+                logger.warn("[TOOLCHAIN] Stopping chain due to failure: {}", execution.getError());
                 break;
             }
         }

@@ -37,15 +37,47 @@ public class MCPServers implements AutoCloseable {
 
 		if (!loadedConfigs.isEmpty()) {
 			mcpServers.addAll(loadedConfigs);
+			logger.info("📅 {} MCP servers loaded from configuration", loadedConfigs.size());
 			return; 
 		}
-
+		
+		logger.warn("⚠️ No MCP servers found in configuration file");
 	}
 
 	private boolean checkCommand(String... command) {
 		try {
-			return new ProcessBuilder(command).start().waitFor() == 0;
+			ProcessBuilder pb = new ProcessBuilder(command);
+			pb.redirectErrorStream(true);
+			Process process = pb.start();
+			return process.waitFor() == 0;
 		} catch (Exception e) {
+			return false;
+		}
+	}
+	
+	/**
+	 * Verifica se um servidor NPX específico está disponível
+	 */
+	private boolean checkNpxServer(String serverCommand) {
+		try {
+			// Extrai o nome do pacote do comando (ex: "npx @modelcontextprotocol/server-filesystem" -> "@modelcontextprotocol/server-filesystem")
+			String packageName = serverCommand.replace("npx ", "").split(" ")[0];
+			
+			// Verifica se o pacote existe no registry npm (timeout curto)
+			ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "npm", "view", packageName, "version");
+			pb.redirectErrorStream(true);
+			Process process = pb.start();
+			
+			// Timeout mais curto para verificação
+			boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+			if (!finished) {
+				process.destroyForcibly();
+				return false;
+			}
+			
+			return process.exitValue() == 0;
+		} catch (Exception e) {
+			logger.debug("Erro verificando servidor NPX {}: {}", serverCommand, e.getMessage());
 			return false;
 		}
 	}
@@ -81,6 +113,13 @@ public class MCPServers implements AutoCloseable {
 
 	private void processServerDependency(MCPService.ServerConfig server, boolean nodeJsAvailable,
 			boolean internetAvailable, boolean dockerAvailable) {
+		
+		// Se o servidor está desabilitado na configuração, não processar
+		if (!server.enabled) {
+			logger.info("⏭️  {:<12} [{}] {} (desabilitado na configuração)", server.name, server.priority, server.description);
+			return;
+		}
+		
 		List<String> missingDeps = new ArrayList<>();
 
 		if (server.environment.containsKey("REQUIRES_NODEJS") && !nodeJsAvailable) {
@@ -105,7 +144,7 @@ public class MCPServers implements AutoCloseable {
 			logger.warn("❌ {:<12} [{}] {} (falta: {})", server.name, server.priority, server.description,
 					String.join(", ", missingDeps));
 		} else {
-			server.enabled = true;
+			// Mantém habilitado apenas se passou em todas as verificações E estava habilitado na config
 			logger.info("✅ {:<12} [{}] {}", server.name, server.priority, server.description);
 		}
 	}

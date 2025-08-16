@@ -8,6 +8,7 @@ import com.gazapps.inference.tooluse.ToolUseInference;
 import com.gazapps.llm.Llm;
 import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.MCPServers;
+import com.gazapps.mcp.MCPIntelligence;
 
 public final class InferenceFactory {
     
@@ -60,6 +61,7 @@ public final class InferenceFactory {
         if (mcpService == null || mcpServers == null) {
             throw new IllegalArgumentException("MCPService e MCPServers são obrigatórios");
         }
+        
         
         return new ToolUseInference(llmService, mcpService, mcpServers, options);
     }

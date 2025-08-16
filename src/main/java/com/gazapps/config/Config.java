@@ -2,6 +2,7 @@ package com.gazapps.config;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -18,6 +19,7 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gazapps.mcp.MCPService;
 
 public class Config {
@@ -56,8 +58,8 @@ public class Config {
             Path configPath = Paths.get(CONFIG_FILE);
             if (!Files.exists(configPath)) {
                 Files.createDirectories(configPath.getParent());
-                // Configuration content already exists from previous recovery
-                logger.info("Config file structure created");
+                createDefaultApplicationProperties();
+                logger.info("✅ Default application.properties created");
             }
         } catch (IOException e) {
             logger.error("Error creating config file: {}", e.getMessage());
@@ -70,6 +72,12 @@ public class Config {
             Files.createDirectories(Paths.get("config/mcp"));
             Files.createDirectories(Paths.get("documents"));
             Files.createDirectories(Paths.get("log"));
+            
+            // Create MCP configuration if it doesn't exist
+            if (!Files.exists(Paths.get(MCP_CONFIG_FILE))) {
+                createDefaultMcpConfig();
+                logger.info("✅ Default .mcp.json created");
+            }
             
             logger.info("📁 Configuration structure verified");
         } catch (IOException e) {
@@ -131,6 +139,16 @@ public class Config {
                         // Set priority
                         int priorityValue = serverNode.get("priority").asInt(1);
                         config.priority = MCPService.ServerConfig.ServerPriority.fromValue(priorityValue);
+                        
+                        // Process environment variables
+                        JsonNode envNode = serverNode.get("env");
+                        if (envNode != null && envNode.isObject()) {
+                            envNode.fields().forEachRemaining(envEntry -> {
+                                config.environment.put(envEntry.getKey(), envEntry.getValue().asText());
+                            });
+                        }
+                        
+                        // Process args if needed (currently not used in ServerConfig but could be extended)
                         
                         configs.add(config);
                     });
@@ -202,6 +220,131 @@ public class Config {
         } catch (Exception e) {
             logger.warn("Error resolving filesystem path: {}", e.getMessage());
             return basePath;
+        }
+    }
+    
+    /**
+     * Creates the default application.properties file with all necessary configurations
+     */
+    private void createDefaultApplicationProperties() throws IOException {
+        String defaultContent = """
+        		
+        		# JavaCLI Application Configuration
+				# Application Info
+				app.name=JavaCLI
+				app.version=0.0.1
+				
+				# MCP Configuration
+				mcp.timeout=30
+				mcp.auto.connect=true
+				
+				# File Paths
+				filesystem.base.path=./documents
+				
+				# API Keys (use environment variables in production)
+				# groq.api.key=${GROQ_API_KEY}
+				# gemini.api.key=${GEMINI_API_KEY}
+				# github.token=${GITHUB_TOKEN}
+				
+				# Logging
+				log.level=INFO
+				log.file=${LOG_DIR}/javacli.log
+				
+				# Gemini Configuration
+				gemini.base.url=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
+				gemini.model=gemini-2.0-flash
+				gemini.timeout=30
+				gemini.debug=false
+				gemini.api.key=
+				
+				# Groq Configuration
+				groq.base.url=https://api.groq.com/openai/v1/chat/completions
+				groq.model=llama-3.3-70b-versatile
+				groq.timeout=30
+				groq.debug=true
+				groq.api.key=
+				
+				# Claude Configuration
+				claude.base.url=https://api.anthropic.com/v1/messages
+				claude.model=claude-3-5-sonnet-20241022
+				claude.timeout=30
+				claude.debug=false
+				claude.api.key=
+				""";
+        
+        try (FileWriter writer = new FileWriter(CONFIG_FILE)) {
+            writer.write(defaultContent);
+        }
+    }
+    
+    /**
+     * Creates the default .mcp.json file with MCP server configurations
+     */
+    private void createDefaultMcpConfig() throws IOException {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode mcpServers = mapper.createObjectNode();
+        
+        // GitHub server
+        ObjectNode github = mapper.createObjectNode();
+        github.put("description", "Integração com GitHub");
+        github.put("command", "npx @modelcontextprotocol/server-github");
+        github.put("priority", 2);
+        github.put("enabled", false);
+        ObjectNode githubEnv = mapper.createObjectNode();
+        githubEnv.put("GITHUB_PERSONAL_ACCESS_TOKEN", "${GITHUB_TOKEN}");
+        githubEnv.put("REQUIRES_NODEJS", "true");
+        githubEnv.put("REQUIRES_ENV", "GITHUB_TOKEN");
+        github.set("env", githubEnv);
+        github.set("args", mapper.createArrayNode());
+        
+        // Memory server
+        ObjectNode memory = mapper.createObjectNode();
+        memory.put("description", "Armazenamento temporário em memória");
+        memory.put("command", "npx @modelcontextprotocol/server-memory");
+        memory.put("priority", 1);
+        memory.put("enabled", true);
+        ObjectNode memoryEnv = mapper.createObjectNode();
+        memoryEnv.put("REQUIRES_NODEJS", "true");
+        memory.set("env", memoryEnv);
+        memory.set("args", mapper.createArrayNode());
+        
+        // Weather server
+        ObjectNode weather = mapper.createObjectNode();
+        weather.put("description", "Previsões meteorológicas via NWS");
+        weather.put("command", "npx @h1deya/mcp-server-weather");
+        weather.put("priority", 1);
+        weather.put("enabled", true);
+        ObjectNode weatherEnv = mapper.createObjectNode();
+        weatherEnv.put("REQUIRES_NODEJS", "true");
+        weatherEnv.put("REQUIRES_ONLINE", "true");
+        weather.set("env", weatherEnv);
+        weather.set("args", mapper.createArrayNode());
+        
+        // Filesystem server
+        ObjectNode filesystem = mapper.createObjectNode();
+        filesystem.put("description", "Sistema de arquivos - Documents");
+        filesystem.put("command", "npx @modelcontextprotocol/server-filesystem");
+        filesystem.put("priority", 3);
+        filesystem.put("enabled", true);
+        ObjectNode filesystemEnv = mapper.createObjectNode();
+        filesystemEnv.put("REQUIRES_NODEJS", "true");
+        filesystem.set("env", filesystemEnv);
+        // Add args array with "./documents"
+        filesystem.set("args", mapper.createArrayNode().add("./documents"));
+        
+        // Add all servers to mcpServers
+        mcpServers.set("github", github);
+        mcpServers.set("memory", memory);
+        mcpServers.set("weather-nws", weather);
+        mcpServers.set("filesystem", filesystem);
+        
+        // Add mcpServers to root
+        root.set("mcpServers", mcpServers);
+        
+        // Write to file with pretty printing
+        try (FileWriter writer = new FileWriter(MCP_CONFIG_FILE)) {
+            writer.write(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root));
         }
     }
 }

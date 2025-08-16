@@ -13,8 +13,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
 import com.gazapps.llm.function.FunctionDeclaration;
-import com.gazapps.mcp.MCPService;
+import com.gazapps.mcp.MCPIntelligence;
 import com.gazapps.mcp.MCPServers;
+import com.gazapps.mcp.MCPService;
 
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema.ListToolsResult;
@@ -30,8 +31,8 @@ public class ToolUseInference implements Inference {
 
     private final MCPService mcpService;
     private final MCPServers mcpServers;
+    private final MCPIntelligence mcpIntelligence; 
     private final Llm llmService;
-    private final boolean debugMode;
     private final int maxToolChainLength;
     private final boolean enableToolChaining;
     
@@ -42,25 +43,24 @@ public class ToolUseInference implements Inference {
     // Dynamic Tool Matcher - substitui lógica hardcoded
     private final DynamicToolMatcher dynamicMatcher = new DynamicToolMatcher();
 
-    public ToolUseInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, Map<String, Object> options) {
+    public ToolUseInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, 
+             Map<String, Object> options) {
         this.llmService = Objects.requireNonNull(llmService);
         this.mcpService = Objects.requireNonNull(mcpService);
         this.mcpServers = Objects.requireNonNull(mcpServers);
-        this.debugMode = (Boolean) options.getOrDefault("debug", false);
+        this.mcpIntelligence = new MCPIntelligence(mcpService, mcpServers);
         this.maxToolChainLength = (Integer) options.getOrDefault("maxToolChainLength", 3);
-        this.enableToolChaining = (Boolean) options.getOrDefault("enableToolChaining", false);
+        this.enableToolChaining = (Boolean) options.getOrDefault("enableToolChaining", true);
         
-        this.toolChain = new ToolChain(mcpService, mcpServers, debugMode);
+        this.toolChain = new ToolChain(mcpService, mcpServers);
         initializeAvailableMcpTools();
     }
 
     @Override
     public String processQuery(String query) {
         try {
-            if (debugMode) {
-                logger.info("[TOOLUSE] Processing query: {}", query);
-            }
-            
+
+            logger.info("[TOOLUSE] Processing query: {}", query);
             toolChain.clear();
             String analysisResult = analyzeQuery(query);
             
@@ -81,16 +81,12 @@ public class ToolUseInference implements Inference {
         
         // PASSO 1: Detectar complexidade da query PRIMEIRO
         boolean isComplexQuery = detectQueryComplexity(queryLower);
+          logger.debug("[TOOLUSE] Query complexity analysis: '{}' | Complex: {}", query, isComplexQuery);
         
-        if (debugMode) {
-            logger.debug("[TOOLUSE] Query complexity analysis: '{}' | Complex: {}", query, isComplexQuery);
-        }
         
         // PASSO 2: Para queries complexas, ir direto para análise LLM
         if (isComplexQuery) {
-            if (debugMode) {
-                logger.debug("[TOOLUSE] Complex query detected - using LLM analysis");
-            }
+            logger.debug("[TOOLUSE] Complex query detected - using LLM analysis");
             return analyzeComplexQuery(query);
         }
         
@@ -105,10 +101,7 @@ public class ToolUseInference implements Inference {
                 );
                 
                 if (result.matches && !result.isComplex) {
-                    if (debugMode) {
-                        logger.debug("[TOOLUSE] Simple single tool match: {} (confidence: {:.3f})", 
-                                    tool.name, result.confidence);
-                    }
+                    logger.debug("[TOOLUSE] Simple single tool match: {} (confidence: {:.3f})",tool.name, result.confidence);
                     return "USE_TOOL:" + tool.name;
                 }
             }
@@ -141,29 +134,7 @@ public class ToolUseInference implements Inference {
      * Detecta se uma query é complexa (requer múltiplas ferramentas)
      */
     private boolean detectQueryComplexity(String queryLower) {
-        // Contar domínios/intenções diferentes
-        int intentCount = 0;
-        
-        // Intenção 1: Criar/escrever arquivos
-        if (queryLower.matches(".*(?:crie|create|arquivo|file|write|escreva|salve|save).*")) {
-            intentCount++;
-        }
-        
-        // Intenção 2: Obter dados (clima, notícias, etc.)
-        if (queryLower.matches(".*(?:dados|data|clima|weather|notícias|news|informações|info).*")) {
-            intentCount++;
-        }
-        
-        // Intenção 3: Com base em localização
-        if (queryLower.matches(".*(?:em|in|de|from|para|to)\\s+[A-ZÀ-Ý][a-zà-ý]+.*")) {
-            intentCount++;
-        }
-        
-        // Palavras que indicam combinação de ações
-        boolean hasConjunctions = queryLower.matches(".*(?:com|with|e|and|usando|using|baseado|based).*");
-        
-        // Complexa se: múltiplas intenções OU conjunções com pelo menos 1 intenção
-        return intentCount > 1 || (intentCount >= 1 && hasConjunctions);
+    	return mcpIntelligence.isComplexQuery(queryLower);
     }
     
     /**
@@ -173,6 +144,13 @@ public class ToolUseInference implements Inference {
         StringBuilder prompt = new StringBuilder();
         prompt.append("Complex query analysis - determine optimal tool strategy.\n\n");
         prompt.append("Query: ").append(query).append("\n\n");
+        
+        int toolCount = mcpIntelligence.countPotentialTools(query);
+        boolean multiServer = mcpIntelligence.requiresMultipleServers(query);
+        
+        prompt.append("MCP Analysis: ").append(toolCount).append(" potential tools, ");
+        prompt.append("multi-server: ").append(multiServer).append("\n\n");
+
         
         // CRÍTICO: Distinção clara entre AÇÃO vs EXPLICAÇÃO
         prompt.append("CRITICAL: This query requires IMMEDIATE TOOL EXECUTION, not explanation.\n");
@@ -197,14 +175,12 @@ public class ToolUseInference implements Inference {
         prompt.append("- 'USE_TOOL:tool_name' if only one tool needed\n");
         prompt.append("- 'DIRECT_RESPONSE' if no tools needed\n\n");
         
-        // MANDATORY: Exemplos específicos de ação vs explicação
         prompt.append("MANDATORY ACTION PATTERNS (respond with TOOL_CHAIN):\n");
         prompt.append("- \"create file X with Y\" → TOOL_CHAIN:content_tool,filesystem_write_file\n");
         prompt.append("- \"save file to location\" → TOOL_CHAIN:filesystem_write_file\n");
         prompt.append("- \"write code to file\" → TOOL_CHAIN:filesystem_write_file\n");
         prompt.append("- \"get data and save\" → TOOL_CHAIN:data_tool,filesystem_write_file\n\n");
         
-        // KISS ADD: Pattern examples (genérico mas orientativo)
         prompt.append("General patterns:\n");
         prompt.append("- \"create X with Y data\" → likely needs: data_tool,create_tool\n");
         prompt.append("- \"save Z from source\" → likely needs: fetch_tool,save_tool\n");
@@ -224,9 +200,8 @@ public class ToolUseInference implements Inference {
                 Map<String, Object> converted = objectMapper.convertValue(schema, Map.class);
                 return converted;
             } catch (Exception e) {
-                if (debugMode) {
-                    logger.warn("[TOOLUSE] Error converting schema for tool {}: {}", toolName, e.getMessage());
-                }
+                logger.error("[TOOLUSE] Error converting schema for tool {}: {}", toolName, e.getMessage());
+
             }
         }
         return null;
@@ -245,19 +220,16 @@ public class ToolUseInference implements Inference {
                 Map<String, Object> converted = objectMapper.convertValue(toolSchema, Map.class);
                 schemaMap = converted;
             } catch (Exception e) {
-                if (debugMode) {
-                    logger.warn("[TOOLUSE] Error converting schema for tool {}: {}", toolName, e.getMessage());
-                }
+                logger.error("[TOOLUSE] Error converting schema for tool {}: {}", toolName, e.getMessage());
+
             }
         }
         
         // Delegar para o matcher dinâmico
         boolean matches = dynamicMatcher.matches(queryLower, description, toolName, serverName, schemaMap);
-        
-        if (debugMode) {
-            logger.debug("[TOOLUSE] Dynamic matching - Query: '{}' | Tool: '{}' | Server: '{}' | Match: {}", 
+        logger.debug("[TOOLUSE] Dynamic matching - Query: '{}' | Tool: '{}' | Server: '{}' | Match: {}", 
                         queryLower, toolName, serverName, matches);
-        }
+        
         
         return matches;
     }
@@ -285,19 +257,15 @@ public class ToolUseInference implements Inference {
 
     private String executeSingleTool(String query, String analysisResult) {
         String toolName = analysisResult.substring("USE_TOOL:".length()).trim();
+        logger.info("[TOOLUSE] Single tool execution: {}", toolName);
+        logger.info("[TOOLUSE] Original query: {}", query);
         
-        if (debugMode) {
-            logger.info("[TOOLUSE] Single tool execution: {}", toolName);
-            logger.info("[TOOLUSE] Original query: {}", query);
-        }
         
         JsonNode toolSchema = getToolSchema(toolName);
         ToolExecution execution = executeWithLLMRetry(toolName, query, toolSchema);
-        
-        if (debugMode) {
-            logger.info("[TOOLUSE] Execution result: success={}, result={}", 
+        logger.info("[TOOLUSE] Execution result: success={}, result={}", 
                        execution.isSuccess(), execution.getResult());
-        }
+     
         
         return generateToolResponse(query, execution);
     }
@@ -316,11 +284,8 @@ public class ToolUseInference implements Inference {
                 } else {
                     parameters = correctParametersWithLLM(toolName, query, parameters, execution.getError(), toolSchema);
                 }
-                
-                if (debugMode) {
-                    logger.info("[TOOLUSE] Attempt {}: Extracted parameters: {}", attempt + 1, parameters);
-                }
-                
+                logger.info("[TOOLUSE] Attempt {}: Extracted parameters: {}", attempt + 1, parameters);
+                                
                 execution = toolChain.execute(toolName, parameters);
                 
                 if (execution.isSuccess()) {
@@ -335,14 +300,12 @@ public class ToolUseInference implements Inference {
                 if (!isParameterValidationError(execution.getError())) {
                     break;
                 }
-                
-                if (debugMode) {
-                    logger.warn("[TOOLUSE] Attempt {} failed with parameter error: {}", 
+                logger.warn("[TOOLUSE] Attempt {} failed with parameter error: {}", 
                                attempt + 1, execution.getError());
-                }
+              
                 
             } catch (Exception e) {
-                logger.warn("[TOOLUSE] Error in attempt {}: {}", attempt + 1, e.getMessage());
+                logger.error("[TOOLUSE] Error in attempt {}: {}", attempt + 1, e.getMessage());
                 if (attempt == MAX_RETRIES) {
                     return ToolExecution.failure(toolName, parameters, 
                                                "Parameter extraction failed after retries: " + e.getMessage(), 0);
@@ -551,21 +514,15 @@ public class ToolUseInference implements Inference {
      * Check if error is related to parameter validation
      */
     private boolean isParameterValidationError(String errorMessage) {
-        if (errorMessage == null) return false;
-        
-        return errorMessage.toLowerCase().contains("validation error") ||
-               errorMessage.toLowerCase().contains("required property") ||
-               errorMessage.toLowerCase().contains("missing") ||
-               errorMessage.toLowerCase().contains("invalid parameter");
+    	return mcpIntelligence.isValidationError(errorMessage, null);
     }
 
     private String executeToolChain(String query, String analysisResult) {
         String toolsString = analysisResult.substring("TOOL_CHAIN:".length()).trim();
         String[] toolNames = toolsString.split(",");
         
-        if (debugMode) {
-            logger.info("[TOOLUSE] Tool chain execution: {}", java.util.Arrays.toString(toolNames));
-        }
+        logger.info("[TOOLUSE] Tool chain execution: {}", java.util.Arrays.toString(toolNames));
+      
         
         List<ToolExecution> executions = new ArrayList<>();
         String lastResult = null;
@@ -669,9 +626,8 @@ public class ToolUseInference implements Inference {
                 }
             }
             
-            if (debugMode) {
-                logger.info("[TOOLUSE] Initialized {} tools with LLM-driven parameter extraction", availableMcpTools.size());
-            }
+            logger.info("[TOOLUSE] Initialized {} tools with LLM-driven parameter extraction", availableMcpTools.size());
+            
             
         } catch (Exception e) {
             logger.error("Erro ao inicializar ferramentas MCP", e);
@@ -700,6 +656,9 @@ public class ToolUseInference implements Inference {
         prompt.append("Complex query detection: enabled (automatic tool chain detection)\n");
         prompt.append("Auto-retry with error correction: enabled (max retries: ").append(MAX_RETRIES).append(")\n");
         prompt.append("Default timezone: ").append(DEFAULT_TIMEZONE).append("\n");
+        prompt.append("MCP Intelligence: enabled (dynamic configuration)\n");
+        Map<String, Object> stats = mcpIntelligence.getStats();
+        prompt.append("MCP stats: ").append(stats.toString()).append("\n");
         if (enableToolChaining) {
             prompt.append("Tool chaining: enabled (max length: ").append(maxToolChainLength).append(")\n");
         }

@@ -162,9 +162,14 @@ public class App implements AutoCloseable {
         try {
             String llmProvider = chatEngine.getLLMService().getProviderName();
             String inferenceStrategy = chatEngine.getInference().getClass().getSimpleName();
+            int connectedServers = chatEngine.getMcpServers().getConnectedServers().size();
             
             System.out.printf("✅ %s configured%n", llmProvider);
-            System.out.println("🔧 MCP servers connected");
+            if (connectedServers > 0) {
+                System.out.printf("🔧 %d MCP servers connected%n", connectedServers);
+            } else {
+                System.out.println("⚠️ No MCP servers connected");
+            }
             System.out.printf("🧠 Strategy: %s%n", inferenceStrategy);
             
         } catch (Exception e) {
