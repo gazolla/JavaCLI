@@ -1,6 +1,5 @@
 package com.gazapps.config;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -182,8 +181,14 @@ public class EnvironmentSetup {
         
         if (envKey == null) return false;
         
-        String value = System.getenv(envKey);
-        return value != null && !value.isEmpty() && !value.startsWith("your_");
+        // ✅ KISS FIX: Check both environment variable and system property
+        String envValue = System.getenv(envKey);
+        if (envValue != null && !envValue.isEmpty() && !envValue.startsWith("your_")) {
+            return true;
+        }
+        
+        String propValue = System.getProperty(envKey);
+        return propValue != null && !propValue.isEmpty() && !propValue.startsWith("your_");
     }
     
     public static boolean setupProviderInline(String provider) {

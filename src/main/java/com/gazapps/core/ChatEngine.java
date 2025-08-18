@@ -58,15 +58,30 @@ public class ChatEngine implements AutoCloseable {
             return response;
             
         } catch (Exception e) {
-            logger.error("Error processing query: {}", e.getMessage(), e);
+        	String detailedMessage = getDetailedErrorMessage(e);
+            logger.error("Error processing query: {}", detailedMessage, e);
             
             // Re-throw with specific context if it's already a specific exception
             if (e instanceof LLMException || e instanceof MCPException) {
-                throw new RuntimeException(e); // Preserve specific exception
+                throw new RuntimeException(detailedMessage, e); // Preserve specific exception
             } else {
-                throw new RuntimeException("Query processing error", e);
+                throw new RuntimeException(detailedMessage, e);
             }
         }
+    }
+    
+    private String getDetailedErrorMessage(Throwable e) {
+        Throwable cause = e;
+        String errorMessage = e.getMessage();
+        
+        while (cause != null) {
+            if (cause.getMessage() != null && !cause.getMessage().isEmpty()) {
+                errorMessage = cause.getMessage();
+            }
+            cause = cause.getCause();
+        }
+        
+        return errorMessage;
     }
     
     public Llm getLLMService() {

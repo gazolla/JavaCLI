@@ -114,33 +114,46 @@ public class RuntimeConfigManager {
     }
     
     public ChatEngine recreateChatEngineWithNewLlm(ChatEngine currentEngine, LlmProvider newProvider) throws Exception {
-        logger.info("Recreating ChatEngine with new LLM provider: {}", newProvider);
+        logger.info("Changing LLM provider to: {}", newProvider);
         
         // Update current provider
         setCurrentProvider(newProvider);
         
-        // Close current engine
-        if (currentEngine != null) {
-            currentEngine.close();
-        }
+        // Reutilizar os servidores MCP existentes
+        com.gazapps.mcp.MCPServers existingMcpServers = currentEngine.getMcpServers();
+        com.gazapps.core.ConversationMemory existingMemory = currentEngine.getMemory();
         
-        // Create new engine with new provider but same strategy
-        return ChatEngineBuilder.currentSetup(newProvider, currentStrategy);
+        // Criar apenas o novo LLM
+        Llm newLlmService = switch (newProvider) {
+            case GEMINI -> com.gazapps.llm.LlmBuilder.gemini(null);
+            case GROQ -> com.gazapps.llm.LlmBuilder.groq(null);
+            case OPENAI -> com.gazapps.llm.LlmBuilder.openai(null);
+            case CLAUDE -> com.gazapps.llm.LlmBuilder.claude(null);
+        };
+        
+        // Criar nova inferência com o novo LLM mas usando MCP existente
+        Inference newInference = createInference(currentStrategy, newLlmService, existingMcpServers);
+        
+        // Criar novo ChatEngine reutilizando MCP e memória
+        return new com.gazapps.core.ChatEngine(newLlmService, newInference, existingMemory, existingMcpServers);
     }
     
     public ChatEngine recreateChatEngineWithNewInference(ChatEngine currentEngine, InferenceStrategy newStrategy) throws Exception {
-        logger.info("Recreating ChatEngine with new inference strategy: {}", newStrategy);
+        logger.info("Changing inference strategy to: {}", newStrategy);
         
         // Update current strategy
         setCurrentStrategy(newStrategy);
         
-        // Close current engine
-        if (currentEngine != null) {
-            currentEngine.close();
-        }
+        // Reutilizar LLM e servidores MCP existentes
+        Llm existingLlmService = currentEngine.getLLMService();
+        com.gazapps.mcp.MCPServers existingMcpServers = currentEngine.getMcpServers();
+        com.gazapps.core.ConversationMemory existingMemory = currentEngine.getMemory();
         
-        // Create new engine with same provider but new strategy
-        return ChatEngineBuilder.currentSetup(currentProvider, newStrategy);
+        // Criar apenas a nova inferência
+        Inference newInference = createInference(newStrategy, existingLlmService, existingMcpServers);
+        
+        // Criar novo ChatEngine reutilizando LLM, MCP e memória
+        return new com.gazapps.core.ChatEngine(existingLlmService, newInference, existingMemory, existingMcpServers);
     }
     
     public boolean validateConfiguration(ChatEngine chatEngine) {
@@ -196,5 +209,18 @@ public class RuntimeConfigManager {
         }
         
         return summary.toString();
+    }
+    
+    // Método auxiliar para criar inferência sem reinicializar MCP
+    private Inference createInference(InferenceStrategy strategy, Llm llmService, com.gazapps.mcp.MCPServers mcpServers) {
+        com.gazapps.mcp.MCPService mcpService = new com.gazapps.mcp.MCPService(); // Apenas o serviço, não as conexões
+        
+        return switch (strategy) {
+            case SIMPLE -> com.gazapps.inference.InferenceFactory.createSimple(llmService, mcpService, mcpServers);
+            case REACT -> com.gazapps.inference.InferenceFactory.createReAct(llmService, mcpService, mcpServers, 
+                             java.util.Map.of("maxIterations", 5, "debug", true));
+            case REFLECTION -> com.gazapps.inference.InferenceFactory.createReflection(llmService, mcpService, mcpServers,
+                             java.util.Map.of("maxIterations", 3, "debug", true));
+        };
     }
 }

@@ -69,11 +69,8 @@ public class ChatEngineBuilder {
             this.mcpServers = new com.gazapps.mcp.MCPServers(this.mcpService);
             
             this.mcpServers.loadServers();
-            System.out.println("Load Servers.");
             this.mcpServers.processServerDependencies();
-            System.out.println("process Server Dependencies.");
             this.mcpServers.connectToServers();
-            System.out.println("connect To Servers.");
         } catch (Exception e) {
             throw new RuntimeException("Falha ao inicializar serviços MCP: " + e.getMessage(), e);
         }

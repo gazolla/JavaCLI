@@ -21,34 +21,36 @@ import com.gazapps.exceptions.ErrorMessageHandler;
 import com.gazapps.exceptions.InputException;
 import com.github.lalyos.jfiglet.FigletFont;
 
-
 public class App implements AutoCloseable {
     
     private static final Logger logger = LoggerFactory.getLogger(App.class);
+    private static final Set<String> EXIT_WORDS = Set.of(
+        "sair", "exit", "bye", "see you", "quit", "adeus", "tchau", "encerrar", "parar"
+    );
+    private static final int MAX_INPUT_LENGTH = 10000;
+    private static final String ASSISTANT_PREFIX = "🤖 Assistant: ";
+    private static final String TIME_FORMAT = " (⏱️  %.2fs)\n";
+    
+    private final LlmProvider llm = ChatEngineBuilder.LlmProvider.GROQ;
+    private final InferenceStrategy inference = ChatEngineBuilder.InferenceStrategy.REACT;
     
     private ChatEngine chatEngine;
     private Scanner scanner;
     private CommandProcessor commandProcessor;
     private RuntimeConfigManager configManager;
-    private static final Set<String> EXIT_WORDS = Set.of(
-            "sair", "exit", "bye", "see you", "quit", "adeus", "tchau", "encerrar", "parar"
-        );
-    private LlmProvider llm = ChatEngineBuilder.LlmProvider.GROQ;
-    private InferenceStrategy inference = ChatEngineBuilder.InferenceStrategy.REACT;
 
-    
     public App() throws Exception {
-        this.configManager = new RuntimeConfigManager(llm.toString(), inference.toString());
-        this.chatEngine = ChatEngineBuilder.currentSetup(llm, inference);
-        this.commandProcessor = new CommandProcessor(chatEngine, configManager, this.chatEngine.getMcpServers());
-
-        this.scanner = new Scanner(System.in);
+        initialize(ChatEngineBuilder.currentSetup(llm, inference));
     }
     
     public App(ChatEngine chatEngine) {
+        initialize(chatEngine);
+    }
+    
+    private void initialize(ChatEngine chatEngine) {
         this.configManager = new RuntimeConfigManager(llm.toString(), inference.toString());
         this.chatEngine = chatEngine;
-        this.commandProcessor = new CommandProcessor(chatEngine, configManager, this.chatEngine.getMcpServers());
+        this.commandProcessor = new CommandProcessor(chatEngine, configManager, chatEngine.getMcpServers());
         this.scanner = new Scanner(System.in);
     }
     
@@ -62,70 +64,65 @@ public class App implements AutoCloseable {
             chatEngine.close();
         }
         
-        // Cleanup environment setup resources
         EnvironmentSetup.cleanup();
-        
         System.exit(0);
     }
     
-	public static void main(String[] args) throws Exception {
-		starting();
-		
-		if (!EnvironmentSetup.ensureApiKeysConfigured()) {
+    public static void main(String[] args) throws Exception {
+        starting();
+        
+        if (!EnvironmentSetup.ensureApiKeysConfigured()) {
             throw new ConfigurationException("Application cannot start without API key configuration");
-	    }
+        }
         
-        Config config = new Config();
-		config.createConfigStructure();
+        new Config().createConfigStructure();
 
-		try (App app = new App()) {
-			app.showSystemStarted();
-			app.runChatLoop();
-		}
-	}
+        try (var app = new App()) {
+            app.showSystemStarted();
+            app.runChatLoop();
+        }
+    }
 
-	private static void starting() throws IOException {
-		String banner = FigletFont.convertOneLine("Java CLI");
-        System.out.println(banner);
+    private static void starting() throws IOException {
+        System.out.println(FigletFont.convertOneLine("Java CLI"));
         System.out.println("Starting...");
-	}
+    }
  
-    private String handleChatQuery(String query) throws Exception {
+    private String handleChatQuery(String query) {
         long startTime = System.currentTimeMillis();
-        
+       
         try {
-            // Basic input validation
-            if (query == null || query.trim().isEmpty()) {
-                throw new InputException("Message cannot be empty");
-            }
-            
-            if (query.length() > 10000) {
-                throw new InputException("Message too long (maximum 10,000 characters)");
-            }
-            
+        	validateInput(query);
             String response = chatEngine.processQuery(query);
-            long endTime = System.currentTimeMillis();
-            
-            StringBuilder resposta = new StringBuilder();
-            resposta.append("🤖 Assistant: ");
-            resposta.append(response);
-            resposta.append(String.format(" (⏱️  %.2fs)\n", (endTime - startTime) / 1000.0));
-            
-            return resposta.toString();
-            
+            return formatResponse(response, startTime);
         } catch (Exception e) {
-            // Use friendly error message handler
             return ErrorMessageHandler.getUserFriendlyMessage(e) + "\n";
         }
+    }
+    
+    private void validateInput(String query) throws InputException {
+        if (query == null || query.trim().isEmpty()) {
+            throw new InputException("Message cannot be empty");
+        }
+        if (query.length() > MAX_INPUT_LENGTH) {
+            throw new InputException("Message too long (maximum 10,000 characters)");
+        }
+    }
+    
+    private String formatResponse(String response, long startTime) {
+        long endTime = System.currentTimeMillis();
+        return ASSISTANT_PREFIX 
+            + response 
+            + String.format(TIME_FORMAT, (endTime - startTime) / 1000.0);
     }
     
     private void runChatLoop() {
         while (true) {
             System.out.print("You: ");
-            String input = scanner.nextLine();
+            var input = scanner.nextLine();
             
-            if (EXIT_WORDS.contains(input.toLowerCase())) {
-            	System.out.println("Closing chat...");
+            if (shouldExit(input)) {
+                System.out.println("Closing chat...");
                 break;
             }
             
@@ -133,51 +130,59 @@ public class App implements AutoCloseable {
                 continue;
             }
             
-            try {
-                // Check if it's a system command
-                if (input.trim().startsWith("/")) {
-                    CommandResult result = commandProcessor.processCommand(input);
-                    System.out.println(result.getMessage());
-                    
-                    // If command changed configuration, update chatEngine
-                    if (result.hasConfigurationChanged()) {
-                        this.chatEngine = result.getNewChatEngine();
-                        commandProcessor.updateChatEngine(this.chatEngine);
-                    }
-                } else {
-                    // Normal chat processing
-                    String response = handleChatQuery(input);
-                    System.out.println(response);
-                }
-                
-                System.out.println();
-                
-            } catch (Exception e) {
-                logger.error("Unexpected error: {}", e.getMessage());
-                System.out.println(ErrorMessageHandler.getUserFriendlyMessage(e));
-                System.out.println();
-            }
+            processInput(input);
         }
-        
         logger.info("Chat ended!");
     }
     
-    private void showSystemStarted() throws IOException {
-        
-        
+    private boolean shouldExit(String input) {
+        return EXIT_WORDS.contains(input.toLowerCase());
+    }
+    
+    private void processInput(String input) {
         try {
-            String llmProvider = chatEngine.getLLMService().getProviderName();
-            String inferenceStrategy = chatEngine.getInference().getClass().getSimpleName();
-            int connectedServers = chatEngine.getMcpServers().getConnectedServers().size();
+            if (input.trim().startsWith("/")) {
+                processCommand(input);
+            } else {
+                System.out.println(handleChatQuery(input));
+            }
+            System.out.println();
+        } catch (Exception e) {
+            handleProcessingError(e);
+        }
+    }
+    
+    private void processCommand(String input) {
+        var result = commandProcessor.processCommand(input);
+        System.out.println(result.getMessage());
+        
+        if (result.hasConfigurationChanged()) {
+            updateChatEngine(result);
+        }
+    }
+    
+    private void updateChatEngine(CommandResult result) {
+        this.chatEngine = result.getNewChatEngine();
+        commandProcessor.updateChatEngine(this.chatEngine);
+    }
+    
+    private void handleProcessingError(Exception e) {
+        logger.error("Unexpected error: {}", e.getMessage());
+        System.out.println(ErrorMessageHandler.getUserFriendlyMessage(e));
+        System.out.println();
+    }
+    
+    private void showSystemStarted() {
+        try {
+            var llmProvider = chatEngine.getLLMService().getProviderName();
+            var inferenceStrategy = chatEngine.getInference().getClass().getSimpleName();
+            var connectedServers = chatEngine.getMcpServers().getConnectedServers().size();
             
             System.out.printf("✅ %s configured%n", llmProvider);
-            if (connectedServers > 0) {
-                System.out.printf("🔧 %d MCP servers connected%n", connectedServers);
-            } else {
-                System.out.println("⚠️ No MCP servers connected");
-            }
+            System.out.printf(connectedServers > 0 
+                ? "🔧 %d MCP servers connected%n" 
+                : "⚠️ No MCP servers connected%n", connectedServers);
             System.out.printf("🧠 Strategy: %s%n", inferenceStrategy);
-            
         } catch (Exception e) {
             System.out.println("Something went wrong...");
         }

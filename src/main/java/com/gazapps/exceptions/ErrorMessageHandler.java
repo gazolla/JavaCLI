@@ -51,7 +51,7 @@ public class ErrorMessageHandler {
         if (e instanceof java.io.IOException) {
             return "📡 Communication problem. Please try again.";
         }
-        
+
         // Fallback for other exceptions
         return String.format("❌ Unexpected error: %s\n💡 Try again or restart the application.", 
                            getSimplifiedMessage(e.getMessage()));

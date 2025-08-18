@@ -64,12 +64,10 @@ public class MCPServers implements AutoCloseable {
 	private boolean checkNpxServer(String serverCommand) {
 		try {
 			String packageName = serverCommand.replace("npx ", "").split(" ")[0];
-			System.out.println(packageName);
 
 			ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "npm", "view", packageName, "version");
 			pb.redirectErrorStream(true);
 			Process process = pb.start();
-			
 
 			boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
 			if (!finished) {

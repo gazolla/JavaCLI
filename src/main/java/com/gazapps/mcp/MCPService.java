@@ -112,7 +112,6 @@ public class MCPService {
                     String[] command;
                     if (System.getProperty("os.name").toLowerCase().contains("win")) {
                         command = new String[]{"cmd.exe", "/c", serverConfig.url};
-                        System.out.println(Arrays.toString(command));
                     } else {
                         command = serverConfig.url.split(" ");
                     }

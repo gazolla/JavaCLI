@@ -115,6 +115,16 @@ public class Config {
         return claudeConfig;
     }
     
+    public Map<String, String> getOpenAiConfig() {
+        Map<String, String> openAiConfig = new HashMap<>();
+        openAiConfig.put("baseUrl", getProperty("openai.base.url", "https://api.openai.com/v1/chat/completions"));
+        openAiConfig.put("model", getProperty("openai.model", "gpt-4o")); // Modelo sugerido, pode ser alterado
+        openAiConfig.put("timeout", getProperty("openai.timeout", "30"));
+        openAiConfig.put("debug", getProperty("openai.debug", "true"));
+        openAiConfig.put("apiKey", getEnvironmentOrProperty("OPENAI_API_KEY", "openai.api.key"));
+        return openAiConfig;
+    }
+    
     public List<MCPService.ServerConfig> loadServerConfigs() {
         List<MCPService.ServerConfig> configs = new ArrayList<>();
         
@@ -168,6 +178,7 @@ public class Config {
             case "groq" -> getGroqConfig();
             case "gemini" -> getGeminiConfig();
             case "claude" -> getClaudeConfig();
+            case "openai" -> getOpenAiConfig();
             default -> new HashMap<>();
         };
         
@@ -190,6 +201,11 @@ public class Config {
         String envValue = System.getenv(envKey);
         if (envValue != null && !envValue.isEmpty()) {
             return envValue;
+        }
+        
+        String systemPropValue = System.getProperty(envKey);
+        if (systemPropValue != null && !systemPropValue.isEmpty()) {
+            return systemPropValue;
         }
         
         // Then try property file
@@ -266,6 +282,13 @@ public class Config {
 				claude.debug=false
 				claude.api.key=
 				
+				# OpenAI Configuration
+				openai.base.url=https://api.openai.com/v1/chat/completions
+				openai.model=gpt-4o
+				openai.timeout=30
+				openai.debug=true
+				openai.api.key=
+								
 				# Reflection Configuration
 				reflection.max.iterations=3
 				reflection.score.threshold=0.8
@@ -331,7 +354,6 @@ public class Config {
         ObjectNode timeEnv = mapper.createObjectNode();
         timeEnv.put("REQUIRE_UVX", "true");
         time.set("env", timeEnv);
-
         
         // Filesystem server
         ObjectNode filesystem = mapper.createObjectNode();
