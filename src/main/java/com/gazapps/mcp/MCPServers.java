@@ -22,10 +22,13 @@ public class MCPServers implements AutoCloseable {
 	public final Map<String, McpSyncClient> mcpClients = new HashMap<>();
 	private final Map<String, MCPService.ServerStatus> serverStatuses = new HashMap<>();
 	private final Map<String, String> toolToServer = new HashMap<>();
-	private final Map<String, Tool> availableMcpTools = new HashMap<>();
+	// Mapeamento reverso: nome simples da tool -> nome com namespace
+	private final Map<String, String> simpleNameToNamespaced = new HashMap<>();
+	final Map<String, Tool> availableMcpTools = new HashMap<>();
 
 	private final MCPService mcpService;
 	public int requestTimeoutSeconds = 30;
+
 
 	public MCPServers(MCPService mcpService) {
 		this.mcpService = mcpService;
@@ -60,15 +63,14 @@ public class MCPServers implements AutoCloseable {
 	 */
 	private boolean checkNpxServer(String serverCommand) {
 		try {
-			// Extrai o nome do pacote do comando (ex: "npx @modelcontextprotocol/server-filesystem" -> "@modelcontextprotocol/server-filesystem")
 			String packageName = serverCommand.replace("npx ", "").split(" ")[0];
-			
-			// Verifica se o pacote existe no registry npm (timeout curto)
+			System.out.println(packageName);
+
 			ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "npm", "view", packageName, "version");
 			pb.redirectErrorStream(true);
 			Process process = pb.start();
 			
-			// Timeout mais curto para verificação
+
 			boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
 			if (!finished) {
 				process.destroyForcibly();
@@ -83,6 +85,7 @@ public class MCPServers implements AutoCloseable {
 	}
 
 	public void processServerDependencies() {
+		boolean isUvxAvailable = checkCommand("cmd.exe", "/c", "uvx", "--version");
 		boolean isNodeAvailable = checkCommand("cmd.exe", "/c", "npx", "--version");
 		boolean isInternetAvailable = checkCommand("ping", "-n", "1", "8.8.8.8");
 		boolean isDockerAvailable = checkCommand("docker", "--version");
@@ -93,7 +96,7 @@ public class MCPServers implements AutoCloseable {
 		logger.info("Docker: {}", (isDockerAvailable ? "✅ Disponível" : "❌ Não encontrado"));
 
 		for (MCPService.ServerConfig server : mcpServers) {
-			processServerDependency(server, isNodeAvailable, isInternetAvailable, isDockerAvailable);
+			processServerDependency(server, isNodeAvailable, isInternetAvailable, isDockerAvailable, isUvxAvailable);
 		}
 
 		mcpServers.sort((a, b) -> Integer.compare(a.priority.getValue(), b.priority.getValue()));
@@ -112,7 +115,7 @@ public class MCPServers implements AutoCloseable {
 	}
 
 	private void processServerDependency(MCPService.ServerConfig server, boolean nodeJsAvailable,
-			boolean internetAvailable, boolean dockerAvailable) {
+			boolean internetAvailable, boolean dockerAvailable, boolean uvxAvailable) {
 		
 		// Se o servidor está desabilitado na configuração, não processar
 		if (!server.enabled) {
@@ -124,6 +127,10 @@ public class MCPServers implements AutoCloseable {
 
 		if (server.environment.containsKey("REQUIRES_NODEJS") && !nodeJsAvailable) {
 			missingDeps.add("Node.js");
+		}
+		
+		if (server.environment.containsKey("REQUIRES_UVX") && !uvxAvailable) {
+			missingDeps.add("uvx");
 		}
 
 		if (server.environment.containsKey("REQUIRES_ONLINE") && !internetAvailable) {
@@ -172,6 +179,7 @@ public class MCPServers implements AutoCloseable {
 	private void connectToServer(MCPService.ServerConfig serverConfig) {
 		try {
 			logger.info("📡 Conectando a {}...", serverConfig.name);
+			
 
 			McpSyncClient client = mcpService.connectToServer(serverConfig);
 
@@ -199,6 +207,8 @@ public class MCPServers implements AutoCloseable {
 				String namespacedToolName = serverName + "_" + toolName;
 				toolToServer.put(namespacedToolName, serverName);
 				availableMcpTools.put(namespacedToolName, mcpTool);
+				// Adicionar mapeamento reverso para resolver nomes simples
+				simpleNameToNamespaced.put(toolName, namespacedToolName);
 			}
 		} catch (Exception e) {
 			logger.error("Erro ao descobrir tools: ", e);
@@ -207,6 +217,17 @@ public class MCPServers implements AutoCloseable {
 
 	public String getServerForTool(String namespacedToolName) {
 		return toolToServer.get(namespacedToolName);
+	}
+
+	/**
+	 * Converte nome simples da tool para nome com namespace.
+	 * Ex: "get_current_time" -> "mcp-time_get_current_time"
+	 * 
+	 * @param simpleName Nome simples da ferramenta
+	 * @return Nome com namespace ou null se não encontrado
+	 */
+	public String getNamespacedToolName(String simpleName) {
+		return simpleNameToNamespaced.get(simpleName);
 	}
 
 	public McpSyncClient getClient(String serverName) {

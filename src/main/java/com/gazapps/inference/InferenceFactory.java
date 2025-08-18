@@ -1,29 +1,18 @@
 package com.gazapps.inference;
 
+import java.util.HashMap;
 import java.util.Map;
 
-import com.gazapps.inference.bigprompt.SimpleSequential;
 import com.gazapps.inference.react.ReActInference;
-import com.gazapps.inference.tooluse.ToolUseInference;
+import com.gazapps.inference.reflection.ReflectionInference;
+import com.gazapps.inference.simple.SimpleInference;
 import com.gazapps.llm.Llm;
 import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.MCPServers;
-import com.gazapps.mcp.MCPIntelligence;
+
 
 public final class InferenceFactory {
     
-    public static Inference createSequential(Llm llmService, MCPService mcpService, MCPServers mcpServers) {
-        if (llmService == null) {
-            throw new IllegalArgumentException("LLMService é obrigatório");
-        }
-        
-        if (mcpService == null || mcpServers == null) {
-            throw new IllegalArgumentException("MCPService e MCPServers são obrigatórios");
-        }
-        
-        SimpleSequential inference = new SimpleSequential(llmService, mcpService, mcpServers);
-        return inference;
-    }
     
     public static Inference createReAct(Llm llmService, MCPService mcpService, MCPServers mcpServers, 
                                         int maxIterations) {
@@ -52,8 +41,8 @@ public final class InferenceFactory {
         return new ReActInference(llmService, mcpService, mcpServers, options);
     }
     
-    public static Inference createToolUse(Llm llmService, MCPService mcpService, MCPServers mcpServers, 
-                                          Map<String, Object> options) {
+    public static Inference createReflection(Llm llmService, MCPService mcpService, MCPServers mcpServers,
+                                            int maxIterations, boolean debug) {
         if (llmService == null) {
             throw new IllegalArgumentException("LLMService é obrigatório");
         }
@@ -62,12 +51,11 @@ public final class InferenceFactory {
             throw new IllegalArgumentException("MCPService e MCPServers são obrigatórios");
         }
         
-        
-        return new ToolUseInference(llmService, mcpService, mcpServers, options);
+        return new ReflectionInference(llmService, mcpService, mcpServers, maxIterations, debug);
     }
     
-    public static Inference createToolUseChained(Llm llmService, MCPService mcpService, MCPServers mcpServers, 
-                                                 int maxChainLength) {
+    public static Inference createReflection(Llm llmService, MCPService mcpService, MCPServers mcpServers,
+                                            Map<String, Object> params) {
         if (llmService == null) {
             throw new IllegalArgumentException("LLMService é obrigatório");
         }
@@ -76,7 +64,31 @@ public final class InferenceFactory {
             throw new IllegalArgumentException("MCPService e MCPServers são obrigatórios");
         }
         
-        return new ToolUseInference(llmService, mcpService, mcpServers, 
-                                   Map.of("debug", true, "enableToolChaining", true, "maxToolChainLength", maxChainLength));
+        return new ReflectionInference(llmService, mcpService, mcpServers, params);
+    }
+    
+    public static Inference createSimple(Llm llmService, MCPService mcpService, MCPServers mcpServers) {
+        if (llmService == null) {
+            throw new IllegalArgumentException("LLMService é obrigatório");
+        }
+        
+        if (mcpService == null || mcpServers == null) {
+            throw new IllegalArgumentException("MCPService e MCPServers são obrigatórios");
+        }
+        
+        return new SimpleInference(llmService, mcpService, mcpServers, new HashMap<>());
+    }
+    
+    public static Inference createSimple(Llm llmService, MCPService mcpService, MCPServers mcpServers,
+                                         Map<String, Object> options) {
+        if (llmService == null) {
+            throw new IllegalArgumentException("LLMService é obrigatório");
+        }
+        
+        if (mcpService == null || mcpServers == null) {
+            throw new IllegalArgumentException("MCPService e MCPServers são obrigatórios");
+        }
+        
+        return new SimpleInference(llmService, mcpService, mcpServers, options);
     }
 }

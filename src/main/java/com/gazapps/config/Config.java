@@ -241,11 +241,6 @@ public class Config {
 				# File Paths
 				filesystem.base.path=./documents
 				
-				# API Keys (use environment variables in production)
-				# groq.api.key=${GROQ_API_KEY}
-				# gemini.api.key=${GEMINI_API_KEY}
-				# github.token=${GITHUB_TOKEN}
-				
 				# Logging
 				log.level=INFO
 				log.file=${LOG_DIR}/javacli.log
@@ -270,6 +265,12 @@ public class Config {
 				claude.timeout=30
 				claude.debug=false
 				claude.api.key=
+				
+				# Reflection Configuration
+				reflection.max.iterations=3
+				reflection.score.threshold=0.8
+				reflection.timeout=60
+				reflection.debug=true
 				""";
         
         try (FileWriter writer = new FileWriter(CONFIG_FILE)) {
@@ -321,23 +322,33 @@ public class Config {
         weather.set("env", weatherEnv);
         weather.set("args", mapper.createArrayNode());
         
+        // Time server
+        ObjectNode time = mapper.createObjectNode();
+        time.put("description", "Servidor para ferramentas de tempo e fuso horário");
+        time.put("command", "uvx mcp-server-time");
+        time.put("priority", 1);
+        time.put("enabled", true);
+        ObjectNode timeEnv = mapper.createObjectNode();
+        timeEnv.put("REQUIRE_UVX", "true");
+        time.set("env", timeEnv);
+
+        
         // Filesystem server
         ObjectNode filesystem = mapper.createObjectNode();
         filesystem.put("description", "Sistema de arquivos - Documents");
-        filesystem.put("command", "npx @modelcontextprotocol/server-filesystem");
+        filesystem.put("command", "npx -y @modelcontextprotocol/server-filesystem " + getWorkspacePath());
         filesystem.put("priority", 3);
         filesystem.put("enabled", true);
         ObjectNode filesystemEnv = mapper.createObjectNode();
         filesystemEnv.put("REQUIRES_NODEJS", "true");
         filesystem.set("env", filesystemEnv);
-        // Add args array with "./documents"
-        filesystem.set("args", mapper.createArrayNode().add("./documents"));
         
         // Add all servers to mcpServers
         mcpServers.set("github", github);
         mcpServers.set("memory", memory);
         mcpServers.set("weather-nws", weather);
         mcpServers.set("filesystem", filesystem);
+        mcpServers.set("time", time);
         
         // Add mcpServers to root
         root.set("mcpServers", mcpServers);

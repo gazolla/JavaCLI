@@ -15,6 +15,8 @@ import com.gazapps.config.EnvironmentSetup;
 import com.gazapps.exceptions.ConfigurationException;
 import com.gazapps.core.ChatEngine;
 import com.gazapps.core.ChatEngineBuilder;
+import com.gazapps.core.ChatEngineBuilder.InferenceStrategy;
+import com.gazapps.core.ChatEngineBuilder.LlmProvider;
 import com.gazapps.exceptions.ErrorMessageHandler;
 import com.gazapps.exceptions.InputException;
 import com.github.lalyos.jfiglet.FigletFont;
@@ -31,16 +33,20 @@ public class App implements AutoCloseable {
     private static final Set<String> EXIT_WORDS = Set.of(
             "sair", "exit", "bye", "see you", "quit", "adeus", "tchau", "encerrar", "parar"
         );
+    private LlmProvider llm = ChatEngineBuilder.LlmProvider.GROQ;
+    private InferenceStrategy inference = ChatEngineBuilder.InferenceStrategy.REACT;
+
     
     public App() throws Exception {
-        this.configManager = new RuntimeConfigManager();
-        this.chatEngine = ChatEngineBuilder.currentSetup(ChatEngineBuilder.LlmProvider.GROQ, ChatEngineBuilder.InferenceStrategy.TOOLUSE);
+        this.configManager = new RuntimeConfigManager(llm.toString(), inference.toString());
+        this.chatEngine = ChatEngineBuilder.currentSetup(llm, inference);
         this.commandProcessor = new CommandProcessor(chatEngine, configManager, this.chatEngine.getMcpServers());
+
         this.scanner = new Scanner(System.in);
     }
     
     public App(ChatEngine chatEngine) {
-        this.configManager = new RuntimeConfigManager();
+        this.configManager = new RuntimeConfigManager(llm.toString(), inference.toString());
         this.chatEngine = chatEngine;
         this.commandProcessor = new CommandProcessor(chatEngine, configManager, this.chatEngine.getMcpServers());
         this.scanner = new Scanner(System.in);

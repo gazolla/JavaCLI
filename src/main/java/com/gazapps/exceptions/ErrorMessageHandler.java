@@ -1,5 +1,7 @@
 package com.gazapps.exceptions;
 
+import com.gazapps.inference.reflection.ReflectionException;
+
 /**
  * Handler for converting technical exceptions to user-friendly messages
  */
@@ -28,6 +30,13 @@ public class ErrorMessageHandler {
         if (e instanceof InputException) {
             return String.format("📝 Invalid input: %s\n💡 Please correct your message and try again.", 
                                 e.getMessage());
+        }
+        
+        if (e instanceof ReflectionException) {
+            ReflectionException refEx = (ReflectionException) e;
+            return String.format("🧠 Reflection process issue in %s phase: %s\n💡 The system was trying to improve its response quality.", 
+                                refEx.getPhase(), 
+                                getSimplifiedMessage(refEx.getMessage()));
         }
         
         // Common network exceptions

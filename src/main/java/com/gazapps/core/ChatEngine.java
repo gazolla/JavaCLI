@@ -30,8 +30,8 @@ public class ChatEngine implements AutoCloseable {
         
 
         
-        if (inference instanceof com.gazapps.inference.bigprompt.SimpleSequential) {
-            ((com.gazapps.inference.bigprompt.SimpleSequential) inference).setConversationMemory(memory);
+        if (inference instanceof com.gazapps.inference.simple.SimpleInference) {
+            ((com.gazapps.inference.simple.SimpleInference) inference).setConversationMemory(memory);
         } else if (inference instanceof com.gazapps.inference.react.ReActInference) {
             ((com.gazapps.inference.react.ReActInference) inference).setConversationMemory(memory);
         }

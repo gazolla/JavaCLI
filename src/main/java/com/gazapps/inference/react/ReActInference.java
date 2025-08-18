@@ -35,6 +35,12 @@ public class ReActInference implements Inference {
     
     private List<FunctionDeclaration> availableMcpTools;
     private Object conversationMemory;
+    
+    @Override
+    public String getStrategyName() {
+        return "react";
+    }
+
 
     public ReActInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, Map<String, Object> options) {
         this.llmService = Objects.requireNonNull(llmService);
@@ -289,9 +295,22 @@ public class ReActInference implements Inference {
 
     private String executeFunction(String functionName, Map<String, Object> args) {
         try {
-            String serverName = mcpServers.getServerForTool(functionName);
+            // Primeiro, tentar obter o nome com namespace
+            String namespacedToolName = mcpServers.getNamespacedToolName(functionName);
+            
+            if (namespacedToolName == null) {
+                // Fallback: talvez já seja um nome com namespace
+                namespacedToolName = functionName;
+            }
+            
+            // Usar a lógica original, mas com nome correto
+            String serverName = mcpServers.getServerForTool(namespacedToolName);
+            if (serverName == null) {
+                return "Tool execution failed: Server not found for tool: " + functionName;
+            }
+            
             McpSyncClient client = mcpServers.getClient(serverName);
-            String originalToolName = functionName.substring(serverName.length() + 1);
+            String originalToolName = namespacedToolName.substring(serverName.length() + 1);
             String result = mcpService.executeToolByName(client, originalToolName, args);
             
             if (debugMode) {

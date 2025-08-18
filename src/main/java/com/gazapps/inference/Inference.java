@@ -6,6 +6,8 @@ public interface Inference extends AutoCloseable {
     
     String buildSystemPrompt();
     
+    String getStrategyName();
+    
     // Default implementation para não quebrar implementações existentes
     @Override
     default void close() {

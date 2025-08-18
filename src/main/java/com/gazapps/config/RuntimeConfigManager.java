@@ -10,20 +10,27 @@ import com.gazapps.core.ChatEngine;
 import com.gazapps.core.ChatEngineBuilder;
 import com.gazapps.core.ChatEngineBuilder.InferenceStrategy;
 import com.gazapps.core.ChatEngineBuilder.LlmProvider;
+import com.gazapps.inference.Inference;
+import com.gazapps.llm.Llm;
 
 public class RuntimeConfigManager {
     
     private static final Logger logger = LoggerFactory.getLogger(RuntimeConfigManager.class);
     
-    private LlmProvider currentProvider = LlmProvider.GROQ;
-    private InferenceStrategy currentStrategy = InferenceStrategy.TOOLUSE;
+    private LlmProvider currentProvider;
+    private InferenceStrategy currentStrategy;
     private Map<String, Object> configCache = new HashMap<>();
     
     public RuntimeConfigManager() {
-        loadCurrentConfiguration();
+       // loadCurrentConfiguration();
     }
     
-    private void loadCurrentConfiguration() {
+    public RuntimeConfigManager(String llmService, String inference) {
+		this.currentProvider = LlmProvider.fromString(llmService);
+		this.currentStrategy = InferenceStrategy.fromString(inference);
+	}
+
+	private void loadCurrentConfiguration() {
         // Load from environment or defaults
         String envProvider = System.getenv("DEFAULT_LLM_PROVIDER");
         if (envProvider != null) {

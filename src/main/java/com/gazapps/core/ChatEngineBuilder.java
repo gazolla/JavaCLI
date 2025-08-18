@@ -33,13 +33,33 @@ public class ChatEngineBuilder {
         GEMINI,
         GROQ,
         OPENAI,
-        CLAUDE
+        CLAUDE;
+        
+        public static LlmProvider fromString(String value) {
+            if (value == null) return null;
+            for (LlmProvider provider : LlmProvider.values()) {
+                if (provider.name().equalsIgnoreCase(value.trim())) {
+                    return provider;
+                }
+            }
+            throw new IllegalArgumentException("invalid Value: " + value);
+        }
     }
     
     public enum InferenceStrategy {
-        SEQUENTIAL,
+        SIMPLE,
         REACT,
-        TOOLUSE
+        REFLECTION;
+    	
+	  public static InferenceStrategy fromString(String value) {
+          if (value == null) return null;
+          for (InferenceStrategy strategy : InferenceStrategy.values()) {
+              if (strategy.name().equalsIgnoreCase(value.trim())) {
+                  return strategy;
+              }
+          }
+          throw new IllegalArgumentException("invalid Value: " + value);
+      }
     }
     
 
@@ -128,30 +148,21 @@ public class ChatEngineBuilder {
                                            com.gazapps.mcp.MCPServers mcpServers,
                                            Map<String, Object> params) {
         return switch (strategy) {
-            case SEQUENTIAL -> InferenceFactory.createSequential(llmService, mcpService, mcpServers);
+            case SIMPLE -> InferenceFactory.createSimple(llmService, mcpService, mcpServers);
             case REACT -> InferenceFactory.createReAct(llmService, mcpService, mcpServers, 
                              params != null ? params : Map.of("maxIterations", 5, "debug", true));
-            case TOOLUSE -> InferenceFactory.createToolUse(llmService, mcpService, mcpServers,
-                             params != null ? params : Map.of("debug", true));
+            case REFLECTION -> InferenceFactory.createReflection(llmService, mcpService, mcpServers,
+                             params != null ? params : Map.of("maxIterations", 3, "debug", true));
         };
     }
     
 
     public static ChatEngine currentSetup(LlmProvider provider) {
-        return currentSetup(provider, InferenceStrategy.SEQUENTIAL);
+        return currentSetup(provider, InferenceStrategy.SIMPLE);
     }
     
     public static ChatEngine currentSetup(LlmProvider provider, InferenceStrategy strategy) {
         return setup(provider, strategy, null);
-    }
-    
-    public static ChatEngine toolUseSetup(LlmProvider provider) {
-        return setup(provider, InferenceStrategy.TOOLUSE, null);
-    }
-    
-    public static ChatEngine toolUseChainedSetup(LlmProvider provider, int maxChainLength) {
-        return setup(provider, InferenceStrategy.TOOLUSE, 
-                   Map.of("maxChainLength", maxChainLength, "debug", true));
     }
     
     public static ChatEngine reactSetup(LlmProvider provider) {
@@ -161,6 +172,20 @@ public class ChatEngineBuilder {
     public static ChatEngine reactSetup(LlmProvider provider, int maxIterations) {
         return setup(provider, InferenceStrategy.REACT, 
                    Map.of("maxIterations", maxIterations, "debug", true));
+    }
+    
+    public static ChatEngine reflectionSetup(LlmProvider provider) {
+        return setup(provider, InferenceStrategy.REFLECTION, null);
+    }
+    
+    public static ChatEngine reflectionSetup(LlmProvider provider, int maxIterations) {
+        return setup(provider, InferenceStrategy.REFLECTION, 
+                   Map.of("maxIterations", maxIterations, "debug", true));
+    }
+    
+    public static ChatEngine reflectionDebugSetup(LlmProvider provider, int maxIterations, boolean debug) {
+        return setup(provider, InferenceStrategy.REFLECTION, 
+                   Map.of("maxIterations", maxIterations, "debug", debug));
     }
     
     @Override

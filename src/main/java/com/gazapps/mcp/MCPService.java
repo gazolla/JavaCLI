@@ -32,7 +32,7 @@ public class MCPService {
 
     private static final Logger logger = LoggerFactory.getLogger(MCPService.class);
     
-    public int requestTimeoutSeconds = 30;
+    public int requestTimeoutSeconds = 5;
 
     public static class ServerConfig {
 
@@ -112,6 +112,7 @@ public class MCPService {
                     String[] command;
                     if (System.getProperty("os.name").toLowerCase().contains("win")) {
                         command = new String[]{"cmd.exe", "/c", serverConfig.url};
+                        System.out.println(Arrays.toString(command));
                     } else {
                         command = serverConfig.url.split(" ");
                     }
@@ -136,11 +137,13 @@ public class MCPService {
     
     public McpSyncClient connectToServer(ServerConfig serverConfig) throws Exception {
         try {
+        	System.out.println("Connecting to MCP server '" + serverConfig.name + "'");
             McpSyncClient client = createMcpClient(serverConfig);
             client.initialize();
             return client;
             
         } catch (Exception e) {
+        	System.out.println("Failed to connect to MCP server '" + serverConfig.name + "': " + e.getMessage());
             throw new ConfigException("Failed to connect to MCP server '" + serverConfig.name + "': " + e.getMessage(), e);
         }
     }

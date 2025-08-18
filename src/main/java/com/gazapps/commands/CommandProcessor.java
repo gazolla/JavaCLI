@@ -21,7 +21,7 @@ public class CommandProcessor {
     private static final Pattern COMMAND_PATTERN = Pattern.compile("^/(\\w+)(?:\\s+(.+))?$");
     
     private static final Set<String> VALID_LLM_PROVIDERS = Set.of("groq", "gemini", "claude", "openai");
-    private static final Set<String> VALID_INFERENCE_STRATEGIES = Set.of("sequential", "react", "tooluse");
+    private static final Set<String> VALID_INFERENCE_STRATEGIES = Set.of("simple", "react", "reflection");
     
     private ChatEngine currentChatEngine;
     private final RuntimeConfigManager configManager;
@@ -129,7 +129,7 @@ public class CommandProcessor {
             return CommandResult.error("""
                 ❌ Strategy parameter required
                 Usage: /inference <strategy>
-                Available strategies: sequential, react, tooluse""");
+                Available strategies: sequential, react, tooluse, reflection""");
         }
         
         strategy = strategy.trim().toLowerCase();
@@ -137,7 +137,7 @@ public class CommandProcessor {
         if (!isValidStrategy(strategy)) {
             return CommandResult.error(String.format("""
                 ❌ Unknown inference strategy '%s'
-                Available strategies: sequential, react, tooluse
+                Available strategies: sequential, react, tooluse, reflection
                 Usage: /inference <strategy>""", strategy));
         }
         
@@ -396,7 +396,7 @@ public class CommandProcessor {
                  Example: /llm groq
                
                /inference <strategy>  - Change inference strategy  
-                 Strategies: sequential, react, tooluse
+                 Strategies: sequential, react, tooluse, reflection
                  Example: /inference react
                
                /workspace [command]   - Manage MCP workspace
@@ -450,9 +450,9 @@ public class CommandProcessor {
     
     private String getStrategyDisplayName(ChatEngineBuilder.InferenceStrategy strategy) {
         return switch (strategy) {
-            case SEQUENTIAL -> "Sequential";
+            case SIMPLE -> "Simple";
             case REACT -> "ReAct (Reasoning and Acting)";
-            case TOOLUSE -> "Tool Use";
+            case REFLECTION -> "Reflection (Self-Improvement)";
         };
     }
     
