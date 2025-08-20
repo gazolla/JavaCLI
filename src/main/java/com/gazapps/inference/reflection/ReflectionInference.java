@@ -8,15 +8,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gazapps.config.Config;
 import com.gazapps.core.ConversationMemory;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
 import com.gazapps.llm.function.FunctionDeclaration;
 import com.gazapps.mcp.MCPInfo;
-import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.MCPServers;
+import com.gazapps.mcp.MCPService;
+import com.gazapps.mcp.ToolManager;
+import com.gazapps.mcp.ToolManager.ToolOperationResult;
 
-import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 /**
@@ -31,11 +33,13 @@ import io.modelcontextprotocol.spec.McpSchema.Tool;
 public class ReflectionInference implements Inference, AutoCloseable {
     
     private static final Logger logger = LoggerFactory.getLogger(ReflectionInference.class);
+    private static final Logger conversationLogger = Config.getInferenceConversationLogger("reflection");
     private static final ObjectMapper objectMapper = new ObjectMapper();
     
     private final Llm llm;
     private final MCPService mcpService;
     private final MCPServers mcpServers;
+    private final ToolManager toolManager;
     private final int maxIterations;
     private final double scoreThreshold;
     private final boolean debug;
@@ -56,6 +60,7 @@ public class ReflectionInference implements Inference, AutoCloseable {
         this.llm = llm;
         this.mcpService = mcpService;
         this.mcpServers = mcpServers;
+        this.toolManager = new ToolManager(new MCPInfo(mcpServers, mcpService), mcpServers);
         this.maxIterations = maxIterations > 0 ? maxIterations : ReflectionCriteria.DEFAULT_MAX_ITERATIONS;
         this.scoreThreshold = ReflectionCriteria.DEFAULT_SCORE_THRESHOLD;
         this.debug = debug;
@@ -107,6 +112,9 @@ public class ReflectionInference implements Inference, AutoCloseable {
             throw new IllegalArgumentException("Query cannot be null or empty");
         }
         
+        // Log da query inicial do usuário
+        conversationLogger.info("USER: {}", cleanUserQuery(query));
+        
         long startTime = System.currentTimeMillis();
         currentSteps.clear();
         
@@ -120,6 +128,9 @@ public class ReflectionInference implements Inference, AutoCloseable {
             String currentResponse = generateInitialResponse(query, toolContext);
             currentSteps.add(new ReflectionStep(ReflectionStep.StepType.INITIAL_RESPONSE, currentResponse, 0));
             
+            // Log da resposta inicial
+            conversationLogger.info("INITIAL_RESPONSE: {}", cleanResponse(currentResponse));
+            
             if (debug) {
                 logger.debug("Initial response generated (length: {})", currentResponse.length());
             }
@@ -131,6 +142,10 @@ public class ReflectionInference implements Inference, AutoCloseable {
                 // Avaliar resposta atual
                 ReflectionResult evaluation = evaluateResponse(query, currentResponse, toolContext);
                 currentSteps.add(new ReflectionStep(ReflectionStep.StepType.EVALUATION, "", evaluation, iteration));
+                
+                // Log da avaliação
+                conversationLogger.info("EVALUATION_{}: Score: {:.1f}/10, Needs improvement: {}", 
+                                      iteration, evaluation.getOverallScore(), evaluation.needsImprovement());
                 
                 if (debug) {
                     logger.debug("Iteration {}: Evaluation complete - score: {:.2f}, needs_improvement: {}", 
@@ -150,6 +165,9 @@ public class ReflectionInference implements Inference, AutoCloseable {
                 String improvedResponse = improveResponse(query, currentResponse, evaluation, toolContext);
                 currentSteps.add(new ReflectionStep(ReflectionStep.StepType.IMPROVEMENT, improvedResponse, iteration));
                 
+                // Log da resposta melhorada
+                conversationLogger.info("IMPROVED_{}: {}", iteration, cleanResponse(improvedResponse));
+                
                 currentResponse = improvedResponse;
                 iteration++;
                 
@@ -161,6 +179,9 @@ public class ReflectionInference implements Inference, AutoCloseable {
             // Resposta final
             currentSteps.add(new ReflectionStep(ReflectionStep.StepType.FINAL, currentResponse, iteration));
             
+            // Log da resposta final
+            conversationLogger.info("ASSISTANT: {}", cleanResponse(currentResponse));
+            
             long endTime = System.currentTimeMillis();
             logger.info("Reflection completed: {} iterations, {} steps, {:.2f}s", 
                        iteration - 1, currentSteps.size(), (endTime - startTime) / 1000.0);
@@ -168,9 +189,11 @@ public class ReflectionInference implements Inference, AutoCloseable {
             return currentResponse;
             
         } catch (ReflectionException e) {
+            conversationLogger.info("ERROR: Reflection failed - {}", e.toString());
             logger.error("Reflection failed: {}", e.toString());
             throw e;
         } catch (Exception e) {
+            conversationLogger.info("ERROR: Unexpected error - {}", e.getMessage());
             logger.error("Unexpected error in reflection process: {}", e.getMessage(), e);
             throw new ReflectionException("Unexpected error in reflection process: " + e.getMessage(), "process", -1, query);
         }
@@ -433,6 +456,68 @@ public class ReflectionInference implements Inference, AutoCloseable {
     public void close() {
         currentSteps.clear();
         logger.info("ReflectionInference closed");
+    }
+    
+    /**
+     * Limpa a query do usuário removendo prompts de sistema
+     */
+    private String cleanUserQuery(String query) {
+        if (query == null || query.trim().isEmpty()) {
+            return "[EMPTY_QUERY]";
+        }
+        
+        // Se é muito longo e contém markers de sistema, extrair query real
+        if (query.length() > 500 && containsSystemPromptMarkers(query)) {
+            String[] lines = query.split("\n");
+            for (String line : lines) {
+                line = line.trim();
+                if (!line.isEmpty() && 
+                    !line.startsWith("You are") &&
+                    !line.startsWith("AVAILABLE TOOLS") &&
+                    !line.startsWith("INSTRUCTIONS") &&
+                    !line.startsWith("USER QUERY:") &&
+                    !line.contains("Based on your thinking")) {
+                    return line.length() > 200 ? line.substring(0, 200) + "..." : line;
+                }
+            }
+        }
+        
+        return query.length() > 200 ? query.substring(0, 200) + "..." : query;
+    }
+    
+    /**
+     * Limpa resposta removendo informações técnicas
+     */
+    private String cleanResponse(String response) {
+        if (response == null || response.trim().isEmpty()) {
+            return "[EMPTY_RESPONSE]";
+        }
+        
+        // Remove calls de função para manter apenas texto da resposta
+        if (response.startsWith("FUNCTION_CALL:") || response.trim().startsWith("[")) {
+            return "[TOOL_CALL_EXECUTED]";
+        }
+        
+        return response.length() > 500 ? response.substring(0, 500) + "..." : response;
+    }
+    
+    /**
+     * Verifica se contém marcadores de prompt de sistema
+     */
+    private boolean containsSystemPromptMarkers(String text) {
+        String[] markers = {
+            "You are", "AVAILABLE TOOLS", "INSTRUCTIONS", "reflection capabilities", 
+            "Based on your thinking", "tool results"
+        };
+        
+        String upperText = text.toUpperCase();
+        for (String marker : markers) {
+            if (upperText.contains(marker.toUpperCase())) {
+                return true;
+            }
+        }
+        
+        return false;
     }
     
     @Override

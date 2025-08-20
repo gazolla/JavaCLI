@@ -69,6 +69,9 @@ public class App implements AutoCloseable {
     }
     
     public static void main(String[] args) throws Exception {
+        // TEMPORARIAMENTE COMENTADO: Configuração muito agressiva interfere com System.out
+        // Config.disableConsoleLoggingImmediately();
+        
         starting();
         
         if (!EnvironmentSetup.ensureApiKeysConfigured()) {

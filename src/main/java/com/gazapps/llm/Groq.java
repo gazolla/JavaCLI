@@ -29,6 +29,7 @@ import com.gazapps.exceptions.InputException;
 public class Groq implements Llm {
 
     private static final Logger logger = LoggerFactory.getLogger(Groq.class);
+    private static final Logger conversationLogger = Config.getLlmConversationLogger("groq");
     private static final ObjectMapper objectMapper = new ObjectMapper();
     
     // Configurações (agora carregadas da Config em vez de hardcoded)
@@ -78,6 +79,9 @@ public class Groq implements Llm {
                 throw new InputException("Prompt too long for Groq (maximum 50,000 characters)");
             }
             
+            // Log da interação limpa
+            String cleanInput = extractCorePrompt(prompt);
+            
             if (debug) {
                 logger.debug("prompt: {}", prompt);
             }
@@ -87,18 +91,33 @@ public class Groq implements Llm {
             HttpResponse<String> response = sendMessage(request);
             FunctionCallResult result = extractAnswer(response);
             
+            String cleanOutput;
+            String finalResult;
+            
             if (debug) {
                 logger.debug("result: {}", result);
             }
             
             if (result != null) {
                 if (result.isFunctionCall()) {
-                    return "FUNCTION_CALL:" + result.getFunctionName() + ":" + objectMapper.writeValueAsString(result.getArguments());
+                    cleanOutput = "[FUNCTION_CALL]";
+                    finalResult = "FUNCTION_CALL:" + result.getFunctionName() + ":" + objectMapper.writeValueAsString(result.getArguments());
                 } else {
-                    return result.getText();
+                    cleanOutput = extractCoreResponse(result.getText());
+                    finalResult = result.getText();
                 }
+            } else {
+                cleanOutput = "[NO_RESPONSE]";
+                finalResult = null;
             }
-            return "";
+            
+            // Log da conversação limpa
+            conversationLogger.info("=== GROQ INTERACTION ===");
+            conversationLogger.info("INPUT: {}", cleanInput);
+            conversationLogger.info("OUTPUT: {}", cleanOutput);
+            conversationLogger.info(""); // linha em branco
+            
+            return finalResult;
             
         } catch (InputException e) {
             throw new RuntimeException(e); // Preserve input validation exception
@@ -262,6 +281,129 @@ public class Groq implements Llm {
         } catch (Exception e) {
             throw new IOException("Failed to process Groq API response: " + e.getMessage(), e);
         }
+    }
+    
+    /**
+     * Extrai o núcleo do prompt removendo instruções técnicas
+     */
+    private String extractCorePrompt(String prompt) {
+        if (prompt == null || prompt.trim().isEmpty()) {
+            return "[EMPTY_PROMPT]";
+        }
+        
+        // Se é muito longo e contém instruções de sistema, extrair query real
+        if (prompt.length() > 300 && containsSystemInstructions(prompt)) {
+            String coreQuery = findUserQuery(prompt);
+            return coreQuery != null ? coreQuery : truncate(prompt, 200);
+        }
+        
+        return truncate(prompt, 300);
+    }
+    
+    /**
+     * Extrai resposta limpa removendo metadados técnicos
+     */
+    private String extractCoreResponse(String response) {
+        if (response == null || response.trim().isEmpty()) {
+            return "[EMPTY_RESPONSE]";
+        }
+        
+        // Se é chamada de função, simplificar
+        if (response.startsWith("FUNCTION_CALL:") || response.trim().startsWith("[{")) {
+            return "[FUNCTION_CALL]";
+        }
+        
+        // Remove prefixos técnicos comuns
+        String cleaned = response;
+        String[] prefixesToRemove = {
+            "THOUGHT:", "ACTION:", "OBSERVATION:", "FINAL ANSWER:",
+            "Based on the tool execution:", "Tool result:"
+        };
+        
+        for (String prefix : prefixesToRemove) {
+            if (cleaned.startsWith(prefix)) {
+                cleaned = cleaned.substring(prefix.length()).trim();
+                break;
+            }
+        }
+        
+        return truncate(cleaned, 500);
+    }
+    
+    /**
+     * Verifica se prompt contém instruções de sistema
+     */
+    private boolean containsSystemInstructions(String prompt) {
+        String[] indicators = {
+            "You are", "AVAILABLE TOOLS", "INSTRUCTIONS", "Based on your thinking",
+            "ORIGINAL QUESTION", "EXECUTION HISTORY", "Now think about"
+        };
+        
+        String upperPrompt = prompt.toUpperCase();
+        for (String indicator : indicators) {
+            if (upperPrompt.contains(indicator.toUpperCase())) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Tenta encontrar a query real do usuário no prompt
+     */
+    private String findUserQuery(String prompt) {
+        String[] lines = prompt.split("\n");
+        
+        for (String line : lines) {
+            line = line.trim();
+            
+            // Procurar por linhas que parecem queries do usuário
+            if (line.length() > 10 && 
+                !line.startsWith("You are") &&
+                !line.startsWith("AVAILABLE") &&
+                !line.startsWith("INSTRUCTIONS") &&
+                !line.startsWith("USER QUERY:") &&
+                !line.startsWith("ORIGINAL QUESTION:") &&
+                !line.contains("THOUGHT") &&
+                !line.contains("ACTION") &&
+                !line.contains("tool") &&
+                !line.startsWith("-") &&
+                !line.startsWith("*")) {
+                
+                // Se parece com uma query real
+                if (line.contains("?") || line.contains("what") || line.contains("how") || 
+                    line.contains("quando") || line.contains("como") || line.contains("que")) {
+                    return line;
+                }
+            }
+        }
+        
+        // Fallback: pegar primeira linha substancial
+        for (String line : lines) {
+            line = line.trim();
+            if (line.length() > 20 && !line.contains("You are") && !line.contains("AVAILABLE")) {
+                return line;
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Trunca texto mantendo legibilidade
+     */
+    private String truncate(String text, int maxLength) {
+        if (text == null) return null;
+        if (text.length() <= maxLength) return text;
+        
+        // Tentar quebrar em palavra completa
+        int lastSpace = text.lastIndexOf(' ', maxLength - 3);
+        if (lastSpace > maxLength / 2) {
+            return text.substring(0, lastSpace) + "...";
+        }
+        
+        return text.substring(0, maxLength - 3) + "...";
     }
 }
 

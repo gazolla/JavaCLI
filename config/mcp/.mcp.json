@@ -1,0 +1,57 @@
+{
+  "mcpServers" : {
+    "github" : {
+      "description" : "Integração com GitHub",
+      "command" : "npx @modelcontextprotocol/server-github",
+      "priority" : 2,
+      "enabled" : false,
+      "env" : {
+        "GITHUB_PERSONAL_ACCESS_TOKEN" : "${GITHUB_TOKEN}",
+        "REQUIRES_NODEJS" : "true",
+        "REQUIRES_ENV" : "GITHUB_TOKEN"
+      },
+      "args" : [ ]
+    },
+    "memory" : {
+      "description" : "Armazenamento temporário em memória",
+      "command" : "npx @modelcontextprotocol/server-memory",
+      "priority" : 1,
+      "enabled" : true,
+      "env" : {
+        "REQUIRES_NODEJS" : "true"
+      },
+      "args" : [ ]
+    },
+    "weather-nws" : {
+      "description" : "Previsões meteorológicas via NWS",
+      "command" : "npx @h1deya/mcp-server-weather",
+      "priority" : 1,
+      "enabled" : true,
+      "env" : {
+        "REQUIRES_NODEJS" : "true",
+        "REQUIRES_ONLINE" : "true"
+      },
+      "args" : [ ]
+    },
+    "filesystem" : {
+      "description" : "Sistema de arquivos - Documents",
+      "command" : "npx -y @modelcontextprotocol/server-filesystem ./documents",
+      "priority" : 3,
+      "enabled" : true,
+      "env" : {
+        "REQUIRES_NODEJS" : "true"
+      }
+    },
+    "time" : {
+      "description" : "Servidor para ferramentas de tempo e fuso horário",
+      "command" : "uvx mcp-server-time",
+      "priority" : 1,
+      "enabled" : true,
+      "env" : {
+        "REQUIRES_UVX" : "true"
+      },
+      "args" : [ ]
+    }
+    }
+  }
+}

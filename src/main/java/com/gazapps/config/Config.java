@@ -22,6 +22,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gazapps.mcp.MCPService;
 
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.encoder.PatternLayoutEncoder;
+import ch.qos.logback.core.rolling.RollingFileAppender;
+import ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy;
+import ch.qos.logback.core.util.FileSize;
+import ch.qos.logback.classic.filter.ThresholdFilter;
+
 public class Config {
     
     private static final Logger logger = LoggerFactory.getLogger(Config.class);
@@ -30,9 +37,14 @@ public class Config {
     
     private Properties properties;
     private ObjectMapper objectMapper = new ObjectMapper();
+    private static boolean loggingConfigured = false; // Static para garantir uma única configuração
     
     public Config() {
+        // PRIMEIRA COISA: Carregar properties
         loadProperties();
+        
+        // SEGUNDA COISA: Configurar logging usando as properties
+        setupProgrammaticLogging();
     }
     
     private void loadProperties() {
@@ -379,5 +391,331 @@ public class Config {
         try (FileWriter writer = new FileWriter(MCP_CONFIG_FILE)) {
             writer.write(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root));
         }
+    }
+    
+    /**
+     * Configuração programática do logging substituindo logback.xml
+     */
+    private void setupProgrammaticLogging() {
+        if (loggingConfigured) return;
+        
+        try {
+            LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+            
+            // IMPORTANTE: Limpar configuração anterior para remover console
+            loggerContext.reset();
+            
+            // Criar diretórios necessários
+            createLogDirectories();
+            
+            // Configurar appenders básicos (mantém funcionalidade atual)
+            setupBasicAppenders(loggerContext);
+            
+            // Configurar appenders de conversação
+            setupConversationAppenders(loggerContext);
+            
+            // Configurar root logger SEM console
+            ch.qos.logback.classic.Logger rootLogger = loggerContext.getLogger(ch.qos.logback.classic.Logger.ROOT_LOGGER_NAME);
+            rootLogger.setLevel(ch.qos.logback.classic.Level.INFO);
+            rootLogger.setAdditive(false); // Impede propagação para console
+            
+            // Configurar TODOS os loggers para não usar console
+            disableConsoleForAllLoggers(loggerContext);
+            
+            loggingConfigured = true;
+            
+            // Usar System.out uma única vez para confirmar que console foi desabilitado
+            System.out.println("\ud83d\udccb Logging configured - console output disabled");
+            
+        } catch (Exception e) {
+            System.err.println("Failed to setup programmatic logging: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Desabilita console para TODOS os loggers existentes e futuros
+     */
+    private void disableConsoleForAllLoggers(LoggerContext loggerContext) {
+        // Desabilitar para todos os pacotes da aplicação
+        String[] packages = {
+            "com.gazapps",
+            "com.gazapps.config", 
+            "com.gazapps.config.EnvironmentSetup",
+            "com.gazapps.mcp",
+            "com.gazapps.llm",
+            "com.gazapps.inference",
+            "root"
+        };
+        
+        RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> appAppender = 
+            (RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent>) 
+            loggerContext.getLogger(ch.qos.logback.classic.Logger.ROOT_LOGGER_NAME).getAppender("APPLICATION");
+        
+        for (String packageName : packages) {
+            ch.qos.logback.classic.Logger logger = loggerContext.getLogger(packageName);
+            logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+            logger.setAdditive(false); // CRITICAL: Sem propagação
+            if (appAppender != null) {
+                logger.addAppender(appAppender);
+            }
+        }
+    }
+    
+    private void createLogDirectories() {
+        String[] dirs = {
+            "log",
+            "log/inference", 
+            "log/llm"
+        };
+        
+        for (String dir : dirs) {
+            File directory = new File(dir);
+            if (!directory.exists()) {
+                directory.mkdirs();
+                logger.debug("📁 Created log directory: {}", dir);
+            }
+        }
+    }
+    
+    private void setupBasicAppenders(LoggerContext loggerContext) {
+        // 1. Application logs (geral)
+        RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> appAppender = 
+            setupFileAppender(loggerContext, "APPLICATION", "log/application.log", 
+                             "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n");
+        
+        // 2. Error logs
+        RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> errorAppender = 
+            setupFileAppender(loggerContext, "ERROR", "log/errors.log", 
+                             "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n");
+        
+        // Adicionar filtro de erro
+        ThresholdFilter errorFilter = new ThresholdFilter();
+        errorFilter.setLevel("ERROR");
+        errorFilter.start();
+        errorAppender.addFilter(errorFilter);
+        
+        // 3. MCP operations (mantém atual)
+        RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> mcpAppender = 
+            setupFileAppender(loggerContext, "MCP", "log/mcp-operations.log", 
+                             "%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n");
+        
+        // Configurar loggers específicos SEM propagação para console
+        ch.qos.logback.classic.Logger mcpLogger = loggerContext.getLogger("com.gazapps.mcp");
+        mcpLogger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        mcpLogger.setAdditive(false); // IMPORTANTE: Impede propagação para console
+        mcpLogger.addAppender(mcpAppender);
+        mcpLogger.addAppender(appAppender); // Também loga no application.log
+        
+        ch.qos.logback.classic.Logger llmLogger = loggerContext.getLogger("com.gazapps.llm");
+        llmLogger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        llmLogger.setAdditive(false); // IMPORTANTE: Impede propagação para console
+        llmLogger.addAppender(appAppender);
+        
+        ch.qos.logback.classic.Logger inferenceLogger = loggerContext.getLogger("com.gazapps.inference");
+        inferenceLogger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        inferenceLogger.setAdditive(false); // IMPORTANTE: Impede propagação para console
+        inferenceLogger.addAppender(appAppender);
+        
+        ch.qos.logback.classic.Logger configLogger = loggerContext.getLogger("com.gazapps.config");
+        configLogger.setLevel(ch.qos.logback.classic.Level.INFO);
+        configLogger.setAdditive(false); // IMPORTANTE: Impede propagação para console
+        configLogger.addAppender(appAppender);
+        
+        // Root logger SEM console appender
+        ch.qos.logback.classic.Logger rootLogger = loggerContext.getLogger(ch.qos.logback.classic.Logger.ROOT_LOGGER_NAME);
+        rootLogger.addAppender(appAppender);
+        rootLogger.addAppender(errorAppender);
+    }
+    
+    private void setupConversationAppenders(LoggerContext loggerContext) {
+        // Buscar appender de aplicação para referência
+        RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> appAppender = null;
+        
+        for (String appenderName : new String[]{"APPLICATION"}) {
+            ch.qos.logback.classic.Logger rootLogger = loggerContext.getLogger(ch.qos.logback.classic.Logger.ROOT_LOGGER_NAME);
+            if (rootLogger.getAppender(appenderName) instanceof RollingFileAppender) {
+                appAppender = (RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent>) rootLogger.getAppender(appenderName);
+                break;
+            }
+        }
+        
+        // Inference conversation loggers usando configurações do properties
+        String[] inferenceTypes = {"react", "reflection", "simple"};
+        
+        for (String type : inferenceTypes) {
+            String enabledKey = "logging.inference." + type + ".conversations.enabled";
+            String fileKey = "logging.inference." + type + ".conversations.file";
+            String patternKey = "logging.inference." + type + ".conversations.pattern";
+            
+            if (isLoggingEnabled(enabledKey)) {
+                String filename = properties.getProperty(fileKey, "log/inference/" + type + "-conversations.log");
+                String pattern = properties.getProperty(patternKey, "%d{HH:mm:ss} %msg%n");
+                
+                RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = 
+                    setupFileAppender(loggerContext, "INFERENCE_CONV_" + type.toUpperCase(), filename, pattern);
+                
+                // Configurar logger específico
+                ch.qos.logback.classic.Logger inferenceLogger = 
+                    loggerContext.getLogger("inference.conversation." + type);
+                inferenceLogger.setLevel(ch.qos.logback.classic.Level.INFO);
+                inferenceLogger.setAdditive(false);
+                inferenceLogger.addAppender(appender);
+            }
+        }
+        
+        // LLM conversation loggers usando configurações do properties
+        String[] llmTypes = {"groq", "claude", "gemini", "openai"};
+        
+        for (String type : llmTypes) {
+            String enabledKey = "logging.llm." + type + ".conversations.enabled";
+            String fileKey = "logging.llm." + type + ".conversations.file";
+            String patternKey = "logging.llm." + type + ".conversations.pattern";
+            
+            if (isLoggingEnabled(enabledKey)) {
+                String filename = properties.getProperty(fileKey, "log/llm/" + type + "-conversations.log");
+                String pattern = properties.getProperty(patternKey, "%d{HH:mm:ss} %msg%n");
+                
+                RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = 
+                    setupFileAppender(loggerContext, "LLM_CONV_" + type.toUpperCase(), filename, pattern);
+                
+                // Configurar logger específico
+                ch.qos.logback.classic.Logger llmLogger = 
+                    loggerContext.getLogger("llm.conversation." + type);
+                llmLogger.setLevel(ch.qos.logback.classic.Level.INFO);
+                llmLogger.setAdditive(false);
+                llmLogger.addAppender(appender);
+            }
+        }
+    }
+    
+    private RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> setupFileAppender(
+            LoggerContext loggerContext, String name, String filename, String pattern) {
+        
+        RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> fileAppender = new RollingFileAppender<>();
+        fileAppender.setContext(loggerContext);
+        fileAppender.setName(name);
+        fileAppender.setFile(filename);
+        
+        // Configurar rolling policy
+        SizeAndTimeBasedRollingPolicy<?> rollingPolicy = new SizeAndTimeBasedRollingPolicy<>();
+        rollingPolicy.setContext(loggerContext);
+        rollingPolicy.setParent(fileAppender);
+        rollingPolicy.setFileNamePattern(filename.replace(".log", ".%d{yyyy-MM-dd}.%i.log"));
+        rollingPolicy.setMaxFileSize(FileSize.valueOf("10MB"));
+        rollingPolicy.setMaxHistory(30);
+        rollingPolicy.start();
+        
+        fileAppender.setRollingPolicy(rollingPolicy);
+        
+        // Configurar encoder
+        PatternLayoutEncoder encoder = new PatternLayoutEncoder();
+        encoder.setContext(loggerContext);
+        encoder.setPattern(pattern);
+        encoder.start();
+        
+        fileAppender.setEncoder(encoder);
+        fileAppender.start();
+        
+        // IMPORTANTE: NÃO adicionar automaticamente ao root logger
+        // Isso será feito manualmente onde necessário
+        
+        return fileAppender;
+    }
+    
+    private boolean isLoggingEnabled(String key) {
+        return Boolean.parseBoolean(properties.getProperty(key, "true"));
+    }
+    
+    /**
+     * Versão menos agressiva - desabilita apenas loggers específicos problemáticos
+     */
+    public static void disableSpecificNoisyLoggers() {
+        try {
+            LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+            
+            // NÃO fazer reset - manter configuração padrão
+            // Desabilitar APENAS loggers que causam ruído
+            String[] noisyLoggers = {
+                "com.gazapps.config.EnvironmentSetup"
+            };
+            
+            for (String loggerName : noisyLoggers) {
+                ch.qos.logback.classic.Logger logger = loggerContext.getLogger(loggerName);
+                logger.setLevel(ch.qos.logback.classic.Level.WARN); // Apenas WARN e ERROR
+            }
+            
+        } catch (Exception e) {
+            System.err.println("Failed to configure specific loggers: " + e.getMessage());
+        }
+    }
+    public static void disableConsoleLoggingImmediately() {
+        try {
+            LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+            loggerContext.reset();
+            
+            // Criar diretório se não existir
+            File logDir = new File("log");
+            if (!logDir.exists()) {
+                logDir.mkdirs();
+            }
+            
+            // Criar appender para arquivo temporário
+            RollingFileAppender<ch.qos.logback.classic.spi.ILoggingEvent> tempAppender = new RollingFileAppender<>();
+            tempAppender.setContext(loggerContext);
+            tempAppender.setName("TEMP_FILE");
+            tempAppender.setFile("log/startup.log");
+            
+            // Encoder simples
+            PatternLayoutEncoder encoder = new PatternLayoutEncoder();
+            encoder.setContext(loggerContext);
+            encoder.setPattern("%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n");
+            encoder.start();
+            
+            tempAppender.setEncoder(encoder);
+            tempAppender.start();
+            
+            // Configurar root logger SEM console - IMPORTANTE: NÃO afetar System.out
+            ch.qos.logback.classic.Logger rootLogger = loggerContext.getLogger(ch.qos.logback.classic.Logger.ROOT_LOGGER_NAME);
+            rootLogger.setLevel(ch.qos.logback.classic.Level.INFO);
+            rootLogger.setAdditive(false); // CRITICAL: Impede que vá para console
+            rootLogger.addAppender(tempAppender);
+            
+            // Desabilitar para todos os pacotes conhecidos
+            String[] packages = {
+                "com.gazapps",
+                "com.gazapps.config",
+                "com.gazapps.config.EnvironmentSetup",
+                "com.gazapps.mcp",
+                "com.gazapps.llm",
+                "com.gazapps.inference"
+            };
+            
+            for (String packageName : packages) {
+                ch.qos.logback.classic.Logger logger = loggerContext.getLogger(packageName);
+                logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+                logger.setAdditive(false); // CRITICAL: Impede propagação para console
+                logger.addAppender(tempAppender);
+            }
+            
+            // IMPORTANTE: NÃO interferir com System.out.println para comunicação do usuário
+            System.out.println("⚡ Console logging disabled - System.out preserved for user communication");
+            
+        } catch (Exception e) {
+            System.err.println("Failed to disable console logging: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Obter logger específico para conversações de inference
+     */
+    public static Logger getInferenceConversationLogger(String inferenceType) {
+        return LoggerFactory.getLogger("inference.conversation." + inferenceType.toLowerCase());
+    }
+    
+    /**
+     * Obter logger específico para conversações de LLM
+     */
+    public static Logger getLlmConversationLogger(String llmType) {
+        return LoggerFactory.getLogger("llm.conversation." + llmType.toLowerCase());
     }
 }

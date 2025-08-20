@@ -1,7 +1,6 @@
 package com.gazapps.inference.react;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -16,15 +15,20 @@ import com.gazapps.config.Config;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
 import com.gazapps.llm.function.FunctionDeclaration;
-import com.gazapps.mcp.MCPService;
+import com.gazapps.mcp.MCPInfo;
 import com.gazapps.mcp.MCPServers;
+import com.gazapps.mcp.MCPService;
+import com.gazapps.mcp.ToolManager;
+import com.gazapps.mcp.ToolManager.ToolOperationResult;
 
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema.ListToolsResult;
+import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 public class ReActInference implements Inference {
 
     private static final Logger logger = LoggerFactory.getLogger(ReActInference.class);
+    private static final Logger conversationLogger = Config.getInferenceConversationLogger("react");
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private final MCPService mcpService;
@@ -32,6 +36,7 @@ public class ReActInference implements Inference {
     private final Llm llmService;
     private final int maxIterations;
     private final boolean debugMode;
+    private final ToolManager toolManager;
     
     private List<FunctionDeclaration> availableMcpTools;
     private Object conversationMemory;
@@ -48,6 +53,7 @@ public class ReActInference implements Inference {
         this.mcpServers = Objects.requireNonNull(mcpServers);
         this.maxIterations = (Integer) options.getOrDefault("maxIterations", 10);
         this.debugMode = (Boolean) options.getOrDefault("debug", false);
+        this.toolManager = new ToolManager(new MCPInfo(mcpServers, mcpService), mcpServers);
         
         initializeAvailableMcpTools();
     }
@@ -55,6 +61,9 @@ public class ReActInference implements Inference {
     @Override
     public String processQuery(String query) {
         List<ReActStep> steps = new ArrayList<>();
+        
+        // Log da query inicial do usuário
+        conversationLogger.info("USER: {}", cleanUserQuery(query));
         
         logger.info("[REACT-DEBUG] Starting ReAct processing for query: {}", query);
         
@@ -67,11 +76,15 @@ public class ReActInference implements Inference {
             String thought = generateThought(query, steps);
             steps.add(ReActStep.thought(thought));
             
+            String cleanThought = cleanThought(thought);
+            conversationLogger.info("THOUGHT_{}: {}", iteration + 1, cleanThought);
+            
             logger.info("[REACT-DEBUG] Generated thought: {}", thought);
             
             // Check if complete
             if (thought.toUpperCase().contains("FINAL ANSWER:")) {
                 String finalAnswer = extractFinalAnswer(thought);
+                conversationLogger.info("ASSISTANT: {}", finalAnswer);
                 logger.info("[REACT-DEBUG] Extracted final answer: {}", finalAnswer);
                 return finalAnswer;
             }
@@ -86,9 +99,16 @@ public class ReActInference implements Inference {
                 if (decision.shouldAct()) {
                     steps.add(ReActStep.action(decision.getToolName(), decision.getArgs()));
                     
+                    // Log da ação
+                    conversationLogger.info("ACTION_{}: {}({})", iteration + 1, 
+                                          decision.getToolName(), formatArgs(decision.getArgs()));
+                    
                     // OBSERVATION
                     String observation = executeFunction(decision.getToolName(), decision.getArgs());
                     steps.add(ReActStep.observation(observation));
+                    
+                    // Log da observação
+                    conversationLogger.info("OBSERVATION_{}: {}", iteration + 1, cleanObservation(observation));
                 } else {
                     logger.info("[REACT-DEBUG] Decision was not to act");
                 }
@@ -101,6 +121,7 @@ public class ReActInference implements Inference {
                steps.stream().filter(s -> s.getType() == ReActStep.StepType.THOUGHT)
                     .map(ReActStep::getContent).collect(Collectors.joining("; "));
                     
+        conversationLogger.info("ASSISTANT: {}", fallbackResult);
         logger.info("[REACT-DEBUG] Returning fallback result: {}", fallbackResult);
         
         return fallbackResult;
@@ -120,13 +141,29 @@ public class ReActInference implements Inference {
             prompt.append("\n");
         }
         
-        // Add available tools info
-        if (availableMcpTools != null && !availableMcpTools.isEmpty()) {
-            prompt.append("AVAILABLE TOOLS:\n");
-            for (FunctionDeclaration tool : availableMcpTools) {
-                prompt.append("- ").append(tool.name).append(": ").append(tool.description).append("\n");
+        // Add available tools info dynamically
+        String toolsInfo = toolManager.getFormattedToolInfo();
+        
+        if (debugMode) {
+            logger.info("[REACT-DEBUG] ToolManager.getFormattedToolInfo() returned: {}", 
+                toolsInfo != null ? toolsInfo.substring(0, Math.min(200, toolsInfo.length())) + "..." : "NULL");
+        }
+        
+        if (toolsInfo != null && !toolsInfo.trim().equals("AVAILABLE TOOLS:") && !toolsInfo.trim().isEmpty()) {
+            prompt.append(toolsInfo).append("\n");
+        } else {
+            // Fallback: get tools directly from MCPInfo
+            List<Tool> allTools = new MCPInfo(mcpServers, mcpService).listAllTools();
+            if (debugMode) {
+                logger.info("[REACT-DEBUG] Fallback: MCPInfo.listAllTools() returned {} tools", allTools.size());
             }
-            prompt.append("\n");
+            if (!allTools.isEmpty()) {
+                prompt.append("AVAILABLE TOOLS:\n");
+                for (Tool tool : allTools) {
+                    prompt.append("- ").append(tool.name()).append(": ").append(tool.description()).append("\n");
+                }
+                prompt.append("\n");
+            }
         }
         
         prompt.append("""
@@ -176,10 +213,17 @@ public class ReActInference implements Inference {
         prompt.append("- IMPORTANT: Files must be created in C:\\Users\\gazol\\Documents (this is the only allowed directory)\n");
         prompt.append("- For memory/storage: use memory tools\n\n");
         
-        prompt.append("AVAILABLE TOOLS:\n");
-        if (availableMcpTools != null) {
-            for (FunctionDeclaration tool : availableMcpTools) {
-                prompt.append("- ").append(tool.name).append(": ").append(tool.description).append("\n");
+        String toolsInfo = toolManager.getFormattedToolInfo();
+        if (toolsInfo != null && !toolsInfo.trim().equals("AVAILABLE TOOLS:") && !toolsInfo.trim().isEmpty()) {
+            prompt.append(toolsInfo);
+        } else {
+            // Fallback: get tools directly from MCPInfo
+            List<Tool> allTools = new MCPInfo(mcpServers, mcpService).listAllTools();
+            if (!allTools.isEmpty()) {
+                prompt.append("AVAILABLE TOOLS:\n");
+                for (Tool tool : allTools) {
+                    prompt.append("- ").append(tool.name()).append(": ").append(tool.description()).append("\n");
+                }
             }
         }
         
@@ -188,11 +232,11 @@ public class ReActInference implements Inference {
         prompt.append("\nFor weather: FUNCTION_CALL:weather-nws_get-forecast:{\"latitude\":40.7128,\"longitude\":-74.0060}\n");
         prompt.append("Use your knowledge of world cities to get the correct coordinates.");
         
-        FunctionDeclaration[] tools = availableMcpTools.toArray(new FunctionDeclaration[0]);
+        FunctionDeclaration[] tools = availableMcpTools != null ? availableMcpTools.toArray(new FunctionDeclaration[0]) : new FunctionDeclaration[0];
         
-        logger.info("[REACT-DEBUG] Available tools count: {}", tools.length);
+        logger.info("[REACT-DEBUG] Available tools for LLM: {} tools", tools.length);
         if (tools.length > 0) {
-            logger.info("[REACT-DEBUG] First tool: {}", tools[0].name);
+            logger.info("[REACT-DEBUG] First tool for LLM: {}", tools[0].name);
         }
         
         String actionResponse = llmService.generateResponse(prompt.toString(), List.of(tools));
@@ -294,45 +338,20 @@ public class ReActInference implements Inference {
     }
 
     private String executeFunction(String functionName, Map<String, Object> args) {
-        try {
-            // Primeiro, tentar obter o nome com namespace
-            String namespacedToolName = mcpServers.getNamespacedToolName(functionName);
-            
-            if (namespacedToolName == null) {
-                // Fallback: talvez já seja um nome com namespace
-                namespacedToolName = functionName;
+        ToolOperationResult result = toolManager.validateAndExecute(functionName, args);
+        
+        if (debugMode) {
+            logger.info("[REACT-DEBUG] ACTION: {}({})", functionName, args);
+            logger.info("[REACT-DEBUG] OBSERVATION: {}", result.isSuccess() ? result.getResult() : result.getErrorMessage());
+        }
+        
+        if (result.isSuccess()) {
+            return result.getResult();
+        } else {
+            String errorMsg = result.getErrorMessage();
+            if (result.getSuggestions() != null && !result.getSuggestions().isEmpty()) {
+                errorMsg += ". Try these alternatives: " + String.join(", ", result.getSuggestions());
             }
-            
-            // Usar a lógica original, mas com nome correto
-            String serverName = mcpServers.getServerForTool(namespacedToolName);
-            if (serverName == null) {
-                return "Tool execution failed: Server not found for tool: " + functionName;
-            }
-            
-            McpSyncClient client = mcpServers.getClient(serverName);
-            String originalToolName = namespacedToolName.substring(serverName.length() + 1);
-            String result = mcpService.executeToolByName(client, originalToolName, args);
-            
-            if (debugMode) {
-                logger.info("[REACT-DEBUG] ACTION: {}({})", functionName, args);
-                logger.info("[REACT-DEBUG] OBSERVATION: {}", result);
-                
-                // Extra debug for weather tool
-                if (functionName.contains("weather")) {
-                    logger.info("[REACT-DEBUG] Weather tool called with result length: {}", result != null ? result.length() : 0);
-                    if (result != null && result.contains("error")) {
-                        logger.warn("[REACT-DEBUG] Weather tool returned error: {}", result);
-                    }
-                }
-            }
-            
-            return result;
-        } catch (Exception e) {
-            String errorMsg = "Tool execution failed: " + e.getMessage();
-            if (e.getMessage().contains("Access denied") || e.getMessage().contains("outside allowed directories")) {
-                errorMsg += ". Remember to use only paths within C:\\Users\\gazol\\Documents";
-            }
-            logger.warn(errorMsg, e);
             return errorMsg;
         }
     }
@@ -346,15 +365,36 @@ public class ReActInference implements Inference {
             for (Map.Entry<String, McpSyncClient> entry : mcpServers.mcpClients.entrySet()) {
                 String serverName = entry.getKey();
                 McpSyncClient client = entry.getValue();
-                ListToolsResult toolsResult = client.listTools();
-                List<io.modelcontextprotocol.spec.McpSchema.Tool> serverTools = toolsResult.tools();
-                for (io.modelcontextprotocol.spec.McpSchema.Tool mcpTool : serverTools) {
-                    String toolName = mcpTool.name();
-                    String namespacedToolName = serverName + "_" + toolName;
-                    FunctionDeclaration geminiFunction = llmService.convertMcpToolToFunction(mcpTool, namespacedToolName);
-                    availableMcpTools.add(geminiFunction);
+                
+                try {
+                    ListToolsResult toolsResult = client.listTools();
+                    List<io.modelcontextprotocol.spec.McpSchema.Tool> serverTools = toolsResult.tools();
+                    
+                    for (io.modelcontextprotocol.spec.McpSchema.Tool mcpTool : serverTools) {
+                        String toolName = mcpTool.name();
+                        String namespacedToolName = serverName + "_" + toolName;
+                        
+                        try {
+                            FunctionDeclaration geminiFunction = llmService.convertMcpToolToFunction(mcpTool, namespacedToolName);
+                            if (geminiFunction != null) {
+                                availableMcpTools.add(geminiFunction);
+                                if (debugMode) {
+                                    logger.info("[REACT-DEBUG] Added tool: {} -> {}", toolName, namespacedToolName);
+                                }
+                            }
+                        } catch (Exception e) {
+                            logger.warn("[REACT-DEBUG] Failed to convert tool {}: {}", toolName, e.getMessage());
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.warn("[REACT-DEBUG] Failed to get tools from server {}: {}", serverName, e.getMessage());
                 }
             }
+            
+            if (debugMode) {
+                logger.info("[REACT-DEBUG] Initialized {} MCP tools for LLM", availableMcpTools.size());
+            }
+            
         } catch (Exception e) {
             logger.error("Erro ao inicializar ferramentas MCP", e);
             availableMcpTools = new ArrayList<>();
@@ -381,15 +421,20 @@ public class ReActInference implements Inference {
             
             """);
         
-        // Add MCP servers info (simplified)
-        if (mcpServers != null && !mcpServers.mcpServers.isEmpty()) {
-            prompt.append("AVAILABLE TOOLS:\n");
-            if (availableMcpTools != null) {
-                for (FunctionDeclaration tool : availableMcpTools) {
-                    prompt.append("- ").append(tool.name).append(": ").append(tool.description).append("\n");
+        // Add available tools info
+        String toolsInfo = toolManager.getFormattedToolInfo();
+        if (toolsInfo != null && !toolsInfo.trim().equals("AVAILABLE TOOLS:") && !toolsInfo.trim().isEmpty()) {
+            prompt.append(toolsInfo).append("\n");
+        } else {
+            // Fallback: get tools directly from MCPInfo  
+            List<Tool> allTools = new MCPInfo(mcpServers, mcpService).listAllTools();
+            if (!allTools.isEmpty()) {
+                prompt.append("AVAILABLE TOOLS:\n");
+                for (Tool tool : allTools) {
+                    prompt.append("- ").append(tool.name()).append(": ").append(tool.description()).append("\n");
                 }
+                prompt.append("\n");
             }
-            prompt.append("\n");
         }
         
         return prompt.toString();
@@ -398,5 +443,96 @@ public class ReActInference implements Inference {
     @Override
     public void close() {
         // Nothing to close
+    }
+    
+    /**
+     * Limpa a query do usuário removendo prompts de sistema
+     */
+    private String cleanUserQuery(String query) {
+        if (query == null || query.trim().isEmpty()) {
+            return "[EMPTY_QUERY]";
+        }
+        
+        // Se é muito longo e contém markers de sistema, extrair query real
+        if (query.length() > 500 && containsSystemPromptMarkers(query)) {
+            String[] lines = query.split("\n");
+            for (String line : lines) {
+                line = line.trim();
+                if (!line.isEmpty() && 
+                    !line.startsWith("You are") &&
+                    !line.startsWith("AVAILABLE TOOLS") &&
+                    !line.startsWith("INSTRUCTIONS") &&
+                    !line.startsWith("USER QUERY:") &&
+                    !line.contains("ORIGINAL QUESTION:") &&
+                    !line.contains("THOUGHT:") &&
+                    !line.contains("ACTION:")) {
+                    return line.length() > 200 ? line.substring(0, 200) + "..." : line;
+                }
+            }
+        }
+        
+        return query.length() > 200 ? query.substring(0, 200) + "..." : query;
+    }
+    
+    /**
+     * Limpa o pensamento removendo prefixos técnicos
+     */
+    private String cleanThought(String thought) {
+        if (thought == null || thought.trim().isEmpty()) {
+            return "[EMPTY_THOUGHT]";
+        }
+        
+        // Remove prefixos comuns
+        String cleaned = thought;
+        if (cleaned.startsWith("THOUGHT:")) {
+            cleaned = cleaned.substring("THOUGHT:".length()).trim();
+        }
+        
+        return cleaned.length() > 300 ? cleaned.substring(0, 300) + "..." : cleaned;
+    }
+    
+    /**
+     * Limpa observação truncando se muito longa
+     */
+    private String cleanObservation(String observation) {
+        if (observation == null || observation.trim().isEmpty()) {
+            return "[EMPTY_OBSERVATION]";
+        }
+        
+        return observation.length() > 400 ? observation.substring(0, 400) + "..." : observation;
+    }
+    
+    /**
+     * Formata argumentos para log
+     */
+    private String formatArgs(Map<String, Object> args) {
+        if (args == null || args.isEmpty()) {
+            return "{}";
+        }
+        
+        try {
+            return objectMapper.writeValueAsString(args);
+        } catch (Exception e) {
+            return args.toString();
+        }
+    }
+    
+    /**
+     * Verifica se contém marcadores de prompt de sistema
+     */
+    private boolean containsSystemPromptMarkers(String text) {
+        String[] markers = {
+            "You are", "AVAILABLE TOOLS", "INSTRUCTIONS", "ReAct", 
+            "EXECUTION HISTORY", "TOOL SELECTION GUIDANCE"
+        };
+        
+        String upperText = text.toUpperCase();
+        for (String marker : markers) {
+            if (upperText.contains(marker.toUpperCase())) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 }

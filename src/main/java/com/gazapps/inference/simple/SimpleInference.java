@@ -16,6 +16,8 @@ import com.gazapps.llm.Llm;
 import com.gazapps.mcp.MCPInfo;
 import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.MCPServers;
+import com.gazapps.mcp.ToolManager;
+import com.gazapps.mcp.ToolManager.ToolOperationResult;
 
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
@@ -32,11 +34,13 @@ import io.modelcontextprotocol.spec.McpSchema.Tool;
 public class SimpleInference implements Inference {
 
     private static final Logger logger = LoggerFactory.getLogger(SimpleInference.class);
+    private static final Logger conversationLogger = Config.getInferenceConversationLogger("simple");
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private final Llm llmService;
     private final MCPInfo mcpInfo;
     private final Config config;
+    private final ToolManager toolManager;
     
     // Configuration loaded from properties
     private final int maxTools;
@@ -56,6 +60,7 @@ public class SimpleInference implements Inference {
             Objects.requireNonNull(mcpService, "MCP service is required")
         );
         this.config = new Config();
+        this.toolManager = new ToolManager(mcpInfo, mcpServers);
         
         // Load configuration from properties using Properties directly
         this.maxTools = Integer.parseInt(getConfigProperty("simple.max.tools", "5"));
@@ -81,6 +86,9 @@ public class SimpleInference implements Inference {
 
     @Override
     public String processQuery(String query) {
+        // Log da query inicial do usuário
+        conversationLogger.info("USER: {}", cleanUserQuery(query));
+        
         if (debug) {
             logger.info("[SIMPLE] Processing query: {}", query);
         }
@@ -92,9 +100,12 @@ public class SimpleInference implements Inference {
                 logger.info("[SIMPLE] Found {} total tools", allTools.size());
             }
 
-            // Step 2: Single LLM call for analysis + decision (KISS approach)
-            String analysisPrompt = buildAnalysisPrompt(query, allTools);
+            // Single LLM call using ToolManager
+            String analysisPrompt = buildAnalysisPrompt(query, toolManager.getAvailableTools());
             String llmResponse = llmService.generateResponse(analysisPrompt, null);
+            
+            // Log da análise
+            conversationLogger.info("ANALYSIS: {}", cleanAnalysis(llmResponse));
             
             if (debug) {
                 logger.info("[SIMPLE] LLM analysis response: {}", llmResponse);
@@ -106,12 +117,15 @@ public class SimpleInference implements Inference {
                 return executeToolAndRespond(llmResponse, query);
             } else {
                 // Direct response - no tools needed
+                conversationLogger.info("ASSISTANT: {}", cleanResponse(llmResponse));
                 return llmResponse;
             }
 
         } catch (Exception e) {
+            String errorMsg = "I encountered an error while processing your request: " + e.getMessage();
+            conversationLogger.info("ERROR: {}", errorMsg);
             logger.error("[SIMPLE] Error processing query", e);
-            return "I encountered an error while processing your request: " + e.getMessage();
+            return errorMsg;
         }
     }
 
@@ -183,24 +197,29 @@ public class SimpleInference implements Inference {
             
             Map<String, Object> args = objectMapper.readValue(argsJson, Map.class);
             
+            // Log da execução da ferramenta
+            conversationLogger.info("TOOL_CALL: {}({})", toolName, formatArgs(args));
+            
             if (debug) {
                 logger.info("[SIMPLE] Executing tool: {} with args: {}", toolName, args);
             }
             
-            // Try to find the namespaced tool name using MCPServers reverse mapping
-            String namespacedToolName = mcpInfo.getNamespacedToolName(toolName);
+            // Use ToolManager for validation and execution
+            ToolOperationResult result = toolManager.validateAndExecute(toolName, args);
             
-            if (namespacedToolName == null) {
-                // Fallback: maybe it's already namespaced
-                namespacedToolName = toolName;
+            if (!result.isSuccess()) {
+                String errorMsg = result.getErrorMessage();
+                if (result.getSuggestions() != null && !result.getSuggestions().isEmpty()) {
+                    errorMsg += ". Try: " + String.join(", ", result.getSuggestions());
+                }
+                conversationLogger.info("ERROR: {}", errorMsg);
+                return errorMsg;
             }
             
-            if (debug) {
-                logger.info("[SIMPLE] Resolved tool name: {} -> {}", toolName, namespacedToolName);
-            }
+            String toolResult = result.getResult();
             
-            // Execute tool
-            String toolResult = mcpInfo.executeTool(namespacedToolName, args);
+            // Log do resultado da ferramenta
+            conversationLogger.info("TOOL_RESULT: {}", cleanToolResult(toolResult));
             
             if (debug) {
                 logger.info("[SIMPLE] Tool result: {}", toolResult);
@@ -214,6 +233,9 @@ public class SimpleInference implements Inference {
                 
             String finalResponse = llmService.generateResponse(finalPrompt, null);
             
+            // Log da resposta final
+            conversationLogger.info("ASSISTANT: {}", cleanResponse(finalResponse));
+            
             if (debug) {
                 logger.info("[SIMPLE] Final response: {}", finalResponse);
             }
@@ -222,6 +244,7 @@ public class SimpleInference implements Inference {
             
         } catch (Exception e) {
             String errorMsg = "Tool execution failed: " + e.getMessage();
+            conversationLogger.info("ERROR: {}", errorMsg);
             if (debug) {
                 logger.error("[SIMPLE] " + errorMsg, e);
             }
@@ -231,14 +254,77 @@ public class SimpleInference implements Inference {
 
     @Override
     public String buildSystemPrompt() {
-        // KISS: Use the same analysis prompt format
-        List<Tool> allTools = mcpInfo.listAllTools();
-        return buildAnalysisPrompt("[System Prompt]", allTools);
+        // KISS: Use ToolManager for available tools
+        return buildAnalysisPrompt("[System Prompt]", toolManager.getAvailableTools());
     }
 
     @Override
     public void close() {
         // No resources to close in this simple implementation
+    }
+    
+    /**
+     * Limpa a query do usuário removendo prompts de sistema
+     */
+    private String cleanUserQuery(String query) {
+        if (query == null || query.trim().isEmpty()) {
+            return "[EMPTY_QUERY]";
+        }
+        
+        return query.length() > 200 ? query.substring(0, 200) + "..." : query;
+    }
+    
+    /**
+     * Limpa a análise da LLM
+     */
+    private String cleanAnalysis(String analysis) {
+        if (analysis == null || analysis.trim().isEmpty()) {
+            return "[EMPTY_ANALYSIS]";
+        }
+        
+        // Se é uma chamada de ferramenta, simplifica
+        if (analysis.startsWith("TOOL:")) {
+            return "Need to use tool";
+        }
+        
+        return analysis.length() > 300 ? analysis.substring(0, 300) + "..." : analysis;
+    }
+    
+    /**
+     * Limpa resposta removendo informações técnicas
+     */
+    private String cleanResponse(String response) {
+        if (response == null || response.trim().isEmpty()) {
+            return "[EMPTY_RESPONSE]";
+        }
+        
+        return response.length() > 500 ? response.substring(0, 500) + "..." : response;
+    }
+    
+    /**
+     * Limpa resultado de ferramenta
+     */
+    private String cleanToolResult(String result) {
+        if (result == null || result.trim().isEmpty()) {
+            return "[EMPTY_RESULT]";
+        }
+        
+        return result.length() > 400 ? result.substring(0, 400) + "..." : result;
+    }
+    
+    /**
+     * Formata argumentos para log
+     */
+    private String formatArgs(Map<String, Object> args) {
+        if (args == null || args.isEmpty()) {
+            return "{}";
+        }
+        
+        try {
+            return objectMapper.writeValueAsString(args);
+        } catch (Exception e) {
+            return args.toString();
+        }
     }
 
     /**
