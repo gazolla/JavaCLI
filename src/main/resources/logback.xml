@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration debug="false" packagingData="false">
+    
+    <!-- Silenciar completamente as mensagens de inicialização do Logback -->
+    <statusListener class="ch.qos.logback.core.status.NopStatusListener" />
+    
+    <!-- File Appender (logs gerais) -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/application.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/application.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>300MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Appender específico para erros -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/errors.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/errors.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>5MB</maxFileSize>
+            <maxHistory>90</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Appender para MCP operations -->
+    <appender name="MCP_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/mcp-operations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/mcp-operations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Appenders para conversações LLM -->
+    <appender name="GROQ_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/llm/groq-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/llm/groq-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <appender name="CLAUDE_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/llm/claude-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/llm/claude-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <appender name="OPENAI_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/llm/openai-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/llm/openai-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <appender name="GEMINI_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/llm/gemini-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/llm/gemini-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Appenders para conversações Inference -->
+    <appender name="REACT_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/inference/react-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/inference/react-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <appender name="REFLECTION_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/inference/reflection-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/inference/reflection-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <appender name="SIMPLE_CONV_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>log/inference/simple-conversations.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>log/inference/simple-conversations.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss} %msg%n</pattern>
+        </encoder>
+    </appender>
+    
+    <!-- Logger específico para MCP -->
+    <logger name="com.gazapps.mcp" level="DEBUG" additivity="false">
+        <appender-ref ref="MCP_FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+    </logger>
+    
+    <!-- Logger para LLM operations -->
+    <logger name="com.gazapps.llm" level="DEBUG" additivity="false">
+        <appender-ref ref="FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+    </logger>
+    
+    <!-- Loggers específicos para conversações LLM -->
+    <logger name="llm.conversation.groq" level="INFO" additivity="false">
+        <appender-ref ref="GROQ_CONV_FILE"/>
+    </logger>
+    
+    <logger name="llm.conversation.claude" level="INFO" additivity="false">
+        <appender-ref ref="CLAUDE_CONV_FILE"/>
+    </logger>
+    
+    <logger name="llm.conversation.openai" level="INFO" additivity="false">
+        <appender-ref ref="OPENAI_CONV_FILE"/>
+    </logger>
+    
+    <logger name="llm.conversation.gemini" level="INFO" additivity="false">
+        <appender-ref ref="GEMINI_CONV_FILE"/>
+    </logger>
+    
+    <!-- Loggers específicos para conversações Inference -->
+    <logger name="inference.conversation.react" level="INFO" additivity="false">
+        <appender-ref ref="REACT_CONV_FILE"/>
+    </logger>
+    
+    <logger name="inference.conversation.reflection" level="INFO" additivity="false">
+        <appender-ref ref="REFLECTION_CONV_FILE"/>
+    </logger>
+    
+    <logger name="inference.conversation.simple" level="INFO" additivity="false">
+        <appender-ref ref="SIMPLE_CONV_FILE"/>
+    </logger>
+    
+    <!-- Root logger - APENAS ARQUIVOS -->
+    <root level="DEBUG">
+        <appender-ref ref="FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+    </root>
+    
+</configuration>

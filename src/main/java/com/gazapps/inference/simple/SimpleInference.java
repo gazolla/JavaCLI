@@ -1,9 +1,9 @@
 package com.gazapps.inference.simple;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +14,7 @@ import com.gazapps.core.ChatEngineBuilder;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
 import com.gazapps.llm.LlmResponse;
+import com.gazapps.llm.tool.ToolCall;
 import com.gazapps.llm.tool.ToolDefinition;
 import com.gazapps.mcp.MCPInfo;
 import com.gazapps.mcp.MCPService;
@@ -24,8 +25,8 @@ import com.gazapps.mcp.ToolManager.ToolOperationResult;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 /**
- * SimpleInference refatorada para usar a nova interface Llm.
- * Remove todo acoplamento específico com implementações de LLM.
+ * SimpleInference com ToolMatcher híbrido: QueryIntent (35+ categorias) + LLM otimizado.
+ * Oferece alta precisão com baixo consumo de tokens através de prompts contextuais.
  */
 public class SimpleInference implements Inference {
 
@@ -34,39 +35,27 @@ public class SimpleInference implements Inference {
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private final Llm llmService;
-    private final MCPInfo mcpInfo;
-    private final Config config;
     private final ToolManager toolManager;
-    
-    // Configuration loaded from properties
-    private final int maxTools;
+    private final LLMToolMatcher llmToolMatcher;
     private final boolean debug;
-    private final String systemPromptTemplate;
-    private final String toolPromptTemplate;
-    private Object conversationMemory;
 
     /**
-     * Constructs SimpleInference seguindo o padrão refatorado.
+     * Constructs SimpleInference com nova arquitetura híbrida.
      */
     public SimpleInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, Map<String, Object> options) {
         this.llmService = Objects.requireNonNull(llmService, "LLM service is required");
-        this.mcpInfo = new MCPInfo(
+        
+        MCPInfo mcpInfo = new MCPInfo(
             Objects.requireNonNull(mcpServers, "MCP servers is required"), 
             Objects.requireNonNull(mcpService, "MCP service is required")
         );
-        this.config = new Config();
-        this.toolManager = new ToolManager(mcpInfo, mcpServers);
         
-        // Load configuration from properties
-        this.maxTools = Integer.parseInt(getConfigProperty("simple.max.tools", "5"));
-        this.debug = Boolean.parseBoolean(getConfigProperty("simple.debug", "true"));
-        this.systemPromptTemplate = getConfigProperty("simple.prompt.system", 
-            "You are an AI assistant with access to tools. Analyze the user query and use the most relevant tools from the following list:\n\n{TOOLS}\n\nProvide accurate and helpful responses using the appropriate tools when needed.");
-        this.toolPromptTemplate = getConfigProperty("simple.prompt.tool",
-            "Based on the tool execution:\n\nTool: {TOOL_NAME}\nResult: {RESULT}\n\nUser Query: {QUERY}\n\nProvide a comprehensive response incorporating the tool result.");
+        this.toolManager = new ToolManager(mcpInfo, mcpServers);
+        this.debug = Boolean.parseBoolean(options.getOrDefault("debug", "true").toString());
+        this.llmToolMatcher = new LLMToolMatcher(llmService, toolManager, debug);
         
         if (debug) {
-            logger.info("[SIMPLE] Initialized with LLM provider: {}, capabilities: {}", 
+            logger.info("[SIMPLE] Initialized HYBRID matcher with LLM provider: {}, capabilities: {}", 
                        llmService.getProviderName(), llmService.getCapabilities());
         }
     }
@@ -75,129 +64,236 @@ public class SimpleInference implements Inference {
     public ChatEngineBuilder.InferenceStrategy getStrategyName() {
         return ChatEngineBuilder.InferenceStrategy.SIMPLE;
     }
-    
-    public void setConversationMemory(Object memory) {
-        this.conversationMemory = memory;
-    }
 
     @Override
     public String processQuery(String query) {
-        conversationLogger.info("USER: {}", cleanUserQuery(query));
+        conversationLogger.info("USER: {}", cleanForLog(query, 200));
         
         if (debug) {
-            logger.info("[SIMPLE] Processing query with {}: {}", llmService.getProviderName(), query);
+            logger.info("[SIMPLE] Processing query with HYBRID matcher: {}", query);
         }
 
         try {
-            // Step 1: Get all available tools and convert to ToolDefinition
-            List<Tool> allMcpTools = mcpInfo.listAllTools();
-            List<ToolDefinition> toolDefinitions = llmService.convertMcpTools(allMcpTools);
+            // 1. Usar LLMToolMatcher híbrido para encontrar ferramentas relevantes
+            List<MatchResult> matches = llmToolMatcher.findRelevantTools(query);
             
-            if (debug) {
-                logger.info("[SIMPLE] Found {} tools, converted to {} ToolDefinitions", 
-                           allMcpTools.size(), toolDefinitions.size());
-            }
-
-            // Step 2: Single LLM call using new interface
-            String analysisPrompt = buildAnalysisPrompt(query, toolManager.getAvailableTools());
-            
-            // Use generateResponse since we're not using tools in analysis phase
-            LlmResponse llmResponse = llmService.generateResponse(analysisPrompt);
-            
-            if (!llmResponse.isSuccess()) {
-                String errorMsg = "LLM analysis failed: " + llmResponse.getErrorMessage();
-                conversationLogger.info("ERROR: {}", errorMsg);
-                return errorMsg;
+            // 2. Decisão baseada nos resultados do matching
+            if (matches.isEmpty()) {
+                return handleDirectResponse(query);
             }
             
-            String analysisResult = llmResponse.getContent();
-            conversationLogger.info("ANALYSIS: {}", cleanAnalysis(analysisResult));
+            if (matches.size() == 1 && matches.get(0).shouldUseTool()) {
+                return handleSingleToolExecution(query, matches.get(0));
+            }
             
-            if (debug) {
-                logger.info("[SIMPLE] LLM analysis response: {}", analysisResult);
+            if (matches.size() > 1) {
+                return handleMultiStepQuery(query, matches);
             }
-
-            // Step 3: Parse response - KISS format
-            if (analysisResult.startsWith("TOOL:")) {
-                // Execute tool and generate contextualized response
-                return executeToolAndRespond(analysisResult, query);
-            } else {
-                // Direct response - no tools needed
-                conversationLogger.info("ASSISTANT: {}", cleanResponse(analysisResult));
-                return analysisResult;
-            }
+            
+            // Fallback: resposta direta se confiança baixa
+            return handleDirectResponse(query);
 
         } catch (Exception e) {
-            String errorMsg = "I encountered an error while processing your request: " + e.getMessage();
+            String errorMsg = "Erro ao processar solicitação: " + e.getMessage();
             conversationLogger.info("ERROR: {}", errorMsg);
             logger.error("[SIMPLE] Error processing query", e);
             return errorMsg;
         }
     }
-
+    
     /**
-     * KISS: Single prompt for analysis + decision
-     * Format: "TOOL:tool_name:{json}" or direct response
+     * Manipula resposta direta do LLM sem ferramentas.
      */
-    private String buildAnalysisPrompt(String query, List<Tool> allTools) {
-        StringBuilder prompt = new StringBuilder();
+    private String handleDirectResponse(String query) {
+        conversationLogger.info("ANALYSIS: Direct response");
         
-        prompt.append("Analyze this user query and decide if any tool is needed.\n\n");
-        prompt.append("USER QUERY: ").append(query).append("\n\n");
+        String prompt = "Responda diretamente à seguinte pergunta usando seu conhecimento:\n\n" + query;
         
-        prompt.append("AVAILABLE TOOLS:\n");
-        for (Tool tool : allTools) {
-            prompt.append("- ").append(tool.name()).append(": ").append(tool.description());
-            
-            // Add parameter information for better LLM understanding
-            if (tool.inputSchema() != null && tool.inputSchema().properties() != null) {
-                prompt.append(" [Parameters: ");
-                Map<String, Object> properties = tool.inputSchema().properties();
-                List<String> required = tool.inputSchema().required();
-                
-                List<String> paramDescriptions = new ArrayList<>();
-                for (Map.Entry<String, Object> entry : properties.entrySet()) {
-                    String paramName = entry.getKey();
-                    Map<String, Object> paramDetails = (Map<String, Object>) entry.getValue();
-                    String paramType = (String) paramDetails.get("type");
-                    String paramDesc = (String) paramDetails.get("description");
-                    
-                    String paramInfo = paramName + "(" + paramType + ")";
-                    if (required != null && required.contains(paramName)) {
-                        paramInfo += "*required*";
-                    }
-                    if (paramDesc != null && !paramDesc.isEmpty()) {
-                        paramInfo += ": " + paramDesc;
-                    }
-                    paramDescriptions.add(paramInfo);
-                }
-                prompt.append(String.join(", ", paramDescriptions));
-                prompt.append("]");
-            }
-            prompt.append("\n");
+        LlmResponse response = llmService.generateResponse(prompt);
+        
+        if (!response.isSuccess()) {
+            String errorMsg = "Falha ao gerar resposta: " + response.getErrorMessage();
+            conversationLogger.info("ERROR: {}", errorMsg);
+            return errorMsg;
         }
         
-        prompt.append("\nINSTRUCTIONS:\n");
-        prompt.append("- If you need to use a tool, respond with: TOOL:tool_name:{\"parameter\":\"value\"}\n");
-        prompt.append("- If no tool is needed, respond directly to the user query\n");
-        prompt.append("- For Brazil/Brasília time queries, ALWAYS use timezone 'America/Sao_Paulo' (never 'America/Brasilia')\n");
-        prompt.append("- Example: For 'Que dia é hoje em Brasília?' respond: TOOL:get_current_time:{\"timezone\":\"America/Sao_Paulo\"}\n");
-        prompt.append("- For weather queries, use get-forecast with latitude and longitude (e.g., NYC: lat=40.7128, lon=-74.0060)\n");
-        prompt.append("- For file operations, use filesystem tools with proper path parameter\n");
-        prompt.append("- Always include ALL required parameters as shown in the tool descriptions\n\n");
+        String content = response.getContent();
+        conversationLogger.info("ASSISTANT: {}", cleanForLog(content, 500));
+        return content;
+    }
+    
+    /**
+     * Manipula execução de uma única ferramenta usando approach otimizada.
+     */
+    private String handleSingleToolExecution(String query, MatchResult match) {
+        conversationLogger.info("ANALYSIS: Single tool execution");
         
-        prompt.append("RESPONSE:");
+        // Usar prompt otimizado baseado na ferramenta específica
+        String prompt = buildOptimizedSingleToolPrompt(query, match.getTool());
+        
+        LlmResponse response = llmService.generateResponse(prompt);
+        
+        if (!response.isSuccess()) {
+            String errorMsg = "Falha na análise da ferramenta: " + response.getErrorMessage();
+            conversationLogger.info("ERROR: {}", errorMsg);
+            return errorMsg;
+        }
+        
+        String analysisResult = response.getContent();
+        
+        if (analysisResult.startsWith("TOOL:")) {
+            return executeToolAndRespond(analysisResult, query);
+        } else {
+            conversationLogger.info("ASSISTANT: {}", cleanForLog(analysisResult, 500));
+            return analysisResult;
+        }
+    }
+    
+    /**
+     * Manipula queries compostas usando generateWithTools.
+     */
+    private String handleMultiStepQuery(String query, List<MatchResult> matches) {
+        conversationLogger.info("ANALYSIS: Multi-step execution ({} candidates)", matches.size());
+        
+        // Converter matches para ToolDefinitions
+        List<ToolDefinition> toolDefinitions = matches.stream()
+            .map(match -> convertToolToDefinition(match.getTool()))
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
+        
+        String prompt = buildOptimizedMultiStepPrompt(query, matches);
+        
+        // Usar generateWithTools para permitir function calling
+        LlmResponse response = llmService.generateWithTools(prompt, toolDefinitions);
+        
+        if (!response.isSuccess()) {
+            String errorMsg = "Falha na execução multi-step: " + response.getErrorMessage();
+            conversationLogger.info("ERROR: {}", errorMsg);
+            return errorMsg;
+        }
+        
+        // Se LLM retornou tool calls, executar sequência
+        if (response.hasToolCalls()) {
+            return executeToolSequence(response.getToolCalls(), query);
+        }
+        
+        // Senão, retornar resposta direta
+        String content = response.getContent();
+        conversationLogger.info("ASSISTANT: {}", cleanForLog(content, 500));
+        return content;
+    }
+    
+    /**
+     * Constrói prompt otimizado para execução de ferramenta única.
+     */
+    private String buildOptimizedSingleToolPrompt(String query, Tool tool) {
+        QueryIntent intent = QueryIntent.detectIntent(query);
+        
+        StringBuilder prompt = new StringBuilder();
+        
+        prompt.append("Execute a seguinte solicitação usando a ferramenta mais apropriada:\n\n");
+        prompt.append("SOLICITAÇÃO: ").append(query).append("\n\n");
+        
+        prompt.append("FERRAMENTA RECOMENDADA:\n");
+        prompt.append("- ").append(tool.name()).append(": ").append(tool.description());
+        
+        // Adicionar exemplos específicos baseados na intenção
+        prompt.append("\n\n").append(generateIntentSpecificExamples(intent, tool));
+        
+        prompt.append("\nINSTRUÇÕES:\n");
+        prompt.append("- Se a ferramenta for relevante, responda: TOOL:").append(tool.name()).append(":{\"param\":\"value\"}\n");
+        prompt.append("- Se não for relevante, responda diretamente\n");
+        prompt.append("- Use TODOS seus conhecimentos (História, cultura, idiomas, "
+        		+ "Ciência, matemática, física, Business, economia, política, Arte, "
+        		+ "literatura, música, Culinária, tradições locais, Tecnologia, "
+        		+ "protocolos, APIs) para fornecer parâmetros corretos.");
+       
         
         return prompt.toString();
     }
     
     /**
-     * KISS: Execute tool and respond in one method using new LLM interface
+     * Constrói prompt otimizado para execução multi-step.
+     */
+    private String buildOptimizedMultiStepPrompt(String query, List<MatchResult> matches) {
+        List<QueryIntent> intents = QueryIntent.detectMultipleIntents(query);
+        
+        StringBuilder prompt = new StringBuilder();
+        
+        prompt.append("Execute a seguinte solicitação usando as ferramentas na ordem correta:\n\n");
+        prompt.append("SOLICITAÇÃO: ").append(query).append("\n\n");
+        
+        prompt.append("FERRAMENTAS RECOMENDADAS:\n");
+        for (MatchResult match : matches) {
+            Tool tool = match.getTool();
+            prompt.append("- ").append(tool.name()).append(": ").append(tool.description())
+                  .append(" (confiança: ").append(String.format("%.1f", match.getConfidence() * 100)).append("%)");
+            prompt.append("\n");
+        }
+        
+        // Adicionar exemplos multi-step baseados nas intenções
+        prompt.append("\n").append(generateMultiStepExamples(intents, matches));
+        
+        prompt.append("\nINSTRUÇÕES:\n");
+        prompt.append("- Execute as ferramentas na ordem necessária\n");
+        prompt.append("- Use resultados de uma ferramenta como entrada da próxima quando aplicável\n");
+        prompt.append("- Use TODOS seus conhecimentos (História, cultura, idiomas, "
+        		+ "Ciência, matemática, física, Business, economia, política, Arte, "
+        		+ "literatura, música, Culinária, tradições locais, Tecnologia, "
+        		+ "protocolos, APIs) para fornecer parâmetros corretos.");
+        
+        return prompt.toString();
+    }
+    
+    /**
+     * Gera exemplos específicos baseados na intenção detectada.
+     */
+    private String generateIntentSpecificExamples(QueryIntent intent, Tool tool) {
+        return switch (intent) {
+            case WEATHER -> String.format(
+                "EXEMPLO:\n✅ \"temperatura em NYC\" → TOOL:%s:{\"latitude\":40.7128,\"longitude\":-74.0060}",
+                tool.name());
+                
+            case DATETIME -> String.format(
+                "EXEMPLO:\n✅ \"que horas são\" → TOOL:%s:{\"timezone\":\"America/Sao_Paulo\"}",
+                tool.name());
+                
+            case FILE_LIST -> String.format(
+                "EXEMPLO:\n✅ \"listar arquivos\" → TOOL:%s:{\"path\":\"documents\"}",
+                tool.name());
+                
+            default -> String.format(
+                "EXEMPLO:\n✅ Queries que precisam de dados externos → TOOL:%s",
+                tool.name());
+        };
+    }
+    
+    /**
+     * Gera exemplos para queries multi-step.
+     */
+    private String generateMultiStepExamples(List<QueryIntent> intents, List<MatchResult> matches) {
+        StringBuilder examples = new StringBuilder("EXEMPLOS MULTI-STEP:\n");
+        
+        if (intents.contains(QueryIntent.WEATHER) && intents.stream().anyMatch(i -> i.getDomain().equals("filesystem"))) {
+            examples.append("✅ \"clima em NYC e salvar arquivo\" → get-forecast + write_file\n");
+        }
+        
+        if (intents.contains(QueryIntent.DATETIME) && intents.stream().anyMatch(i -> i.getDomain().equals("filesystem"))) {
+            examples.append("✅ \"que horas são e criar relatório\" → get_current_time + write_file\n");
+        }
+        
+        examples.append("✅ Execute ferramentas em sequência lógica\n");
+        
+        return examples.toString();
+    }
+    
+    /**
+     * Executa uma única ferramenta baseada na resposta do LLM.
      */
     private String executeToolAndRespond(String toolResponse, String originalQuery) {
         try {
             // Parse TOOL:name:{json} format
-            String[] parts = toolResponse.substring(5).split(":", 2); // Remove "TOOL:" prefix
+            String[] parts = toolResponse.substring(5).split(":", 2);
             String toolName = parts[0];
             String argsJson = parts.length > 1 ? parts[1] : "{}";
             
@@ -205,107 +301,128 @@ public class SimpleInference implements Inference {
             
             conversationLogger.info("TOOL_CALL: {}({})", toolName, formatArgs(args));
             
-            if (debug) {
-                logger.info("[SIMPLE] Executing tool: {} with args: {}", toolName, args);
-            }
-            
-            // Use ToolManager for validation and execution
             ToolOperationResult result = toolManager.validateAndExecute(toolName, args);
             
             if (!result.isSuccess()) {
                 String errorMsg = result.getErrorMessage();
                 if (result.getSuggestions() != null && !result.getSuggestions().isEmpty()) {
-                    errorMsg += ". Try: " + String.join(", ", result.getSuggestions());
+                    errorMsg += ". Sugestões: " + String.join(", ", result.getSuggestions());
                 }
                 conversationLogger.info("ERROR: {}", errorMsg);
                 return errorMsg;
             }
             
             String toolResult = result.getResult();
-            conversationLogger.info("TOOL_RESULT: {}", cleanToolResult(toolResult));
+            conversationLogger.info("TOOL_RESULT: {}", cleanForLog(toolResult, 400));
             
-            if (debug) {
-                logger.info("[SIMPLE] Tool result: {}", toolResult);
-            }
-            
-            // Generate contextualized response using new LLM interface
-            String finalPrompt = toolPromptTemplate
-                .replace("{TOOL_NAME}", toolName)
-                .replace("{RESULT}", toolResult)
-                .replace("{QUERY}", originalQuery);
+            // Gerar resposta contextualizada
+            String finalPrompt = String.format(
+                "Baseado na execução da ferramenta:\n\nFerramenta: %s\nResultado: %s\n\nSolicitação original: %s\n\nForneça uma resposta abrangente incorporando o resultado da ferramenta.",
+                toolName, toolResult, originalQuery
+            );
                 
             LlmResponse finalResponse = llmService.generateResponse(finalPrompt);
             
             if (!finalResponse.isSuccess()) {
-                String errorMsg = "Failed to generate final response: " + finalResponse.getErrorMessage();
-                conversationLogger.info("ERROR: {}", errorMsg);
-                return errorMsg;
+                return "Ferramenta executada com sucesso, mas falha ao gerar resposta final: " + finalResponse.getErrorMessage();
             }
             
             String responseContent = finalResponse.getContent();
-            conversationLogger.info("ASSISTANT: {}", cleanResponse(responseContent));
-            
-            if (debug) {
-                logger.info("[SIMPLE] Final response: {}", responseContent);
-            }
+            conversationLogger.info("ASSISTANT: {}", cleanForLog(responseContent, 500));
             
             return responseContent;
             
         } catch (Exception e) {
-            String errorMsg = "Tool execution failed: " + e.getMessage();
+            String errorMsg = "Falha na execução da ferramenta: " + e.getMessage();
             conversationLogger.info("ERROR: {}", errorMsg);
-            if (debug) {
-                logger.error("[SIMPLE] " + errorMsg, e);
-            }
             return errorMsg;
         }
+    }
+    
+    /**
+     * Executa sequência de ferramentas para queries compostas.
+     */
+    private String executeToolSequence(List<ToolCall> toolCalls, String originalQuery) {
+        StringBuilder results = new StringBuilder();
+        Map<String, String> context = new java.util.HashMap<>();
+        
+        conversationLogger.info("SEQUENCE: Executing {} tools", toolCalls.size());
+        
+        for (int i = 0; i < toolCalls.size(); i++) {
+            ToolCall toolCall = toolCalls.get(i);
+            
+            try {
+                conversationLogger.info("TOOL_CALL[{}]: {}({})", i + 1, toolCall.getToolName(), formatArgs(toolCall.getArguments()));
+                
+                ToolOperationResult result = toolManager.validateAndExecute(toolCall.getToolName(), toolCall.getArguments());
+                
+                if (!result.isSuccess()) {
+                    String errorMsg = String.format("Falha no passo %d: %s", i + 1, result.getErrorMessage());
+                    conversationLogger.info("ERROR: {}", errorMsg);
+                    return errorMsg;
+                }
+                
+                String stepResult = result.getResult();
+                context.put(toolCall.getToolName() + "_result", stepResult);
+                results.append(String.format("Passo %d (%s): %s\n", i + 1, toolCall.getToolName(), stepResult));
+                
+                conversationLogger.info("TOOL_RESULT[{}]: {}", i + 1, cleanForLog(stepResult, 200));
+                
+            } catch (Exception e) {
+                String errorMsg = String.format("Erro no passo %d: %s", i + 1, e.getMessage());
+                conversationLogger.info("ERROR: {}", errorMsg);
+                return errorMsg;
+            }
+        }
+        
+        // Consolidar resultados
+        String finalPrompt = String.format(
+            "Consolide os seguintes resultados em uma resposta final:\n\nSolicitação original: %s\n\nResultados:\n%s\n\nForneça um resumo consolidado e útil.",
+            originalQuery, results.toString()
+        );
+        
+        LlmResponse finalResponse = llmService.generateResponse(finalPrompt);
+        
+        if (!finalResponse.isSuccess()) {
+            return "Sequência executada com sucesso:\n" + results.toString();
+        }
+        
+        String responseContent = finalResponse.getContent();
+        conversationLogger.info("ASSISTANT: {}", cleanForLog(responseContent, 500));
+        
+        return responseContent;
+    }
+    
+    /**
+     * Converte Tool MCP para ToolDefinition.
+     */
+    private ToolDefinition convertToolToDefinition(Tool tool) {
+        // Delega para o LLM service que já tem essa lógica
+        List<Tool> singleToolList = List.of(tool);
+        List<ToolDefinition> definitions = llmService.convertMcpTools(singleToolList);
+        return definitions.isEmpty() ? null : definitions.get(0);
     }
 
     @Override
     public String buildSystemPrompt() {
-        return buildAnalysisPrompt("[System Prompt]", toolManager.getAvailableTools());
+        return "Sistema de inferência híbrido com 35+ categorias de QueryIntent e LLM otimizado para seleção contextual de ferramentas.";
     }
 
     @Override
     public void close() {
-        // No resources to close in this simple implementation
+        // Limpar cache do LLMToolMatcher
+        if (llmToolMatcher != null) {
+            llmToolMatcher.clearCache();
+        }
     }
     
-    // Helper methods for logging (unchanged)
+    // Helper methods para logging
     
-    private String cleanUserQuery(String query) {
-        if (query == null || query.trim().isEmpty()) {
-            return "[EMPTY_QUERY]";
+    private String cleanForLog(String text, int maxLength) {
+        if (text == null || text.trim().isEmpty()) {
+            return "[EMPTY]";
         }
-        return query.length() > 200 ? query.substring(0, 200) + "..." : query;
-    }
-    
-    private String cleanAnalysis(String analysis) {
-        if (analysis == null || analysis.trim().isEmpty()) {
-            return "[EMPTY_ANALYSIS]";
-        }
-        
-        if (analysis.startsWith("TOOL:")) {
-            return "Need to use tool";
-        }
-        
-        return analysis.length() > 300 ? analysis.substring(0, 300) + "..." : analysis;
-    }
-    
-    private String cleanResponse(String response) {
-        if (response == null || response.trim().isEmpty()) {
-            return "[EMPTY_RESPONSE]";
-        }
-        
-        return response.length() > 500 ? response.substring(0, 500) + "..." : response;
-    }
-    
-    private String cleanToolResult(String result) {
-        if (result == null || result.trim().isEmpty()) {
-            return "[EMPTY_RESULT]";
-        }
-        
-        return result.length() > 400 ? result.substring(0, 400) + "..." : result;
+        return text.length() > maxLength ? text.substring(0, maxLength) + "..." : text;
     }
     
     private String formatArgs(Map<String, Object> args) {
@@ -317,23 +434,6 @@ public class SimpleInference implements Inference {
             return objectMapper.writeValueAsString(args);
         } catch (Exception e) {
             return args.toString();
-        }
-    }
-
-    /**
-     * Helper method to access Config properties using reflection.
-     */
-    private String getConfigProperty(String key, String defaultValue) {
-        try {
-            java.lang.reflect.Field propertiesField = config.getClass().getDeclaredField("properties");
-            propertiesField.setAccessible(true);
-            java.util.Properties properties = (java.util.Properties) propertiesField.get(config);
-            return properties.getProperty(key, defaultValue);
-        } catch (Exception e) {
-            if (debug) {
-                logger.warn("[SIMPLE] Could not access property {}: {}", key, e.getMessage());
-            }
-            return defaultValue;
         }
     }
 }

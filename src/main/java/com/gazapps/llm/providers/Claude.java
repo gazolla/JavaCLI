@@ -82,12 +82,51 @@ public class Claude implements Llm {
         try {
             validateInput(prompt);
             
+            // === LOGGING REQUEST ===
+            if (conversationLogger.isInfoEnabled()) {
+                conversationLogger.info("=== CLAUDE REQUEST ===");
+                conversationLogger.info("Model: {}", model);
+                conversationLogger.info("Prompt: {}", prompt);
+                if (tools != null && !tools.isEmpty()) {
+                    conversationLogger.info("Tools: {} tool(s) available", tools.size());
+                    tools.forEach(tool -> 
+                        conversationLogger.info("  - {}: {}", tool.getName(), tool.getDescription())
+                    );
+                }
+            }
+            
             HttpRequest request = buildRequest(prompt, tools);
             HttpResponse<String> response = sendRequest(request);
+            LlmResponse llmResponse = parseResponse(response);
             
-            return parseResponse(response);
+            // === LOGGING RESPONSE ===
+            if (conversationLogger.isInfoEnabled()) {
+                conversationLogger.info("=== CLAUDE RESPONSE ===");
+                conversationLogger.info("Success: {}", llmResponse.isSuccess());
+                if (llmResponse.isSuccess()) {
+                    conversationLogger.info("Content: {}", llmResponse.getContent());
+                    if (llmResponse.hasToolCalls()) {
+                        conversationLogger.info("Tool calls: {}", llmResponse.getToolCalls().size());
+                        llmResponse.getToolCalls().forEach(toolCall ->
+                            conversationLogger.info("  - {}: {}", toolCall.getToolName(), toolCall.getArguments())
+                        );
+                    }
+                } else {
+                    conversationLogger.info("Error: {}", llmResponse.getErrorMessage());
+                }
+                conversationLogger.info("=== END CLAUDE ===");
+            }
+            
+            return llmResponse;
             
         } catch (Exception e) {
+            // === LOGGING ERROR ===
+            if (conversationLogger.isErrorEnabled()) {
+                conversationLogger.error("=== CLAUDE ERROR ===");
+                conversationLogger.error("Error: {}", e.getMessage());
+                conversationLogger.error("=== END CLAUDE ERROR ===");
+            }
+            
             LlmException.ErrorType errorType = determineErrorType(e);
             throw new LlmException(getProviderName(), errorType, e.getMessage(), e);
         }
