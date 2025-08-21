@@ -242,4 +242,14 @@ public class ToolManager {
             return System.currentTimeMillis() - cacheTime > 300000; // 5 minutes
         }
     }
+
+	/**
+	 * Returns the MCPInfo instance used by this ToolManager.
+	 * This provides access to MCP-related information and operations.
+	 * 
+	 * @return the MCPInfo instance
+	 */
+	public MCPInfo getMcpInfo() {
+		return mcpInfo;
+	}
 }

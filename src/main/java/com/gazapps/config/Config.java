@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.gazapps.mcp.MCPService;
+import com.gazapps.core.ChatEngineBuilder;
 
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.encoder.PatternLayoutEncoder;
@@ -185,12 +186,12 @@ public class Config {
         return configs;
     }
     
-    public boolean isLlmConfigValid(String provider) {
-        Map<String, String> config = switch (provider.toLowerCase()) {
-            case "groq" -> getGroqConfig();
-            case "gemini" -> getGeminiConfig();
-            case "claude" -> getClaudeConfig();
-            case "openai" -> getOpenAiConfig();
+    public boolean isLlmConfigValid(ChatEngineBuilder.LlmProvider provider) {
+        Map<String, String> config = switch (provider) {
+            case GROQ -> getGroqConfig();
+            case GEMINI -> getGeminiConfig();
+            case CLAUDE -> getClaudeConfig();
+            case OPENAI -> getOpenAiConfig();
             default -> new HashMap<>();
         };
         
@@ -540,9 +541,8 @@ public class Config {
         }
         
         // Inference conversation loggers usando configurações do properties
-        String[] inferenceTypes = {"react", "reflection", "simple"};
-        
-        for (String type : inferenceTypes) {
+        for (ChatEngineBuilder.InferenceStrategy strategy : ChatEngineBuilder.InferenceStrategy.values()) {
+            String type = strategy.name().toLowerCase();
             String enabledKey = "logging.inference." + type + ".conversations.enabled";
             String fileKey = "logging.inference." + type + ".conversations.file";
             String patternKey = "logging.inference." + type + ".conversations.pattern";
@@ -564,9 +564,8 @@ public class Config {
         }
         
         // LLM conversation loggers usando configurações do properties
-        String[] llmTypes = {"groq", "claude", "gemini", "openai"};
-        
-        for (String type : llmTypes) {
+        for (ChatEngineBuilder.LlmProvider llmProvider : ChatEngineBuilder.LlmProvider.values()) {
+            String type = llmProvider.name().toLowerCase();
             String enabledKey = "logging.llm." + type + ".conversations.enabled";
             String fileKey = "logging.llm." + type + ".conversations.file";
             String patternKey = "logging.llm." + type + ".conversations.pattern";

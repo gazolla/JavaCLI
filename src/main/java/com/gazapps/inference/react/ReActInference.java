@@ -9,22 +9,25 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gazapps.config.Config;
+import com.gazapps.core.ChatEngineBuilder;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
-import com.gazapps.llm.function.FunctionDeclaration;
+import com.gazapps.llm.LlmResponse;
+import com.gazapps.llm.tool.ToolDefinition;
 import com.gazapps.mcp.MCPInfo;
 import com.gazapps.mcp.MCPServers;
 import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.ToolManager;
 import com.gazapps.mcp.ToolManager.ToolOperationResult;
 
-import io.modelcontextprotocol.client.McpSyncClient;
-import io.modelcontextprotocol.spec.McpSchema.ListToolsResult;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
+/**
+ * ReActInference refatorada para usar a nova interface Llm.
+ * Remove todo acoplamento específico com implementações de LLM.
+ */
 public class ReActInference implements Inference {
 
     private static final Logger logger = LoggerFactory.getLogger(ReActInference.class);
@@ -38,14 +41,13 @@ public class ReActInference implements Inference {
     private final boolean debugMode;
     private final ToolManager toolManager;
     
-    private List<FunctionDeclaration> availableMcpTools;
+    private List<ToolDefinition> availableToolDefinitions;
     private Object conversationMemory;
     
     @Override
-    public String getStrategyName() {
-        return "react";
+    public ChatEngineBuilder.InferenceStrategy getStrategyName() {
+        return ChatEngineBuilder.InferenceStrategy.REACT;
     }
-
 
     public ReActInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, Map<String, Object> options) {
         this.llmService = Objects.requireNonNull(llmService);
@@ -55,14 +57,18 @@ public class ReActInference implements Inference {
         this.debugMode = (Boolean) options.getOrDefault("debug", false);
         this.toolManager = new ToolManager(new MCPInfo(mcpServers, mcpService), mcpServers);
         
-        initializeAvailableMcpTools();
+        initializeAvailableTools();
+        
+        if (debugMode) {
+            logger.info("[REACT] Initialized with LLM provider: {}, capabilities: {}", 
+                       llmService.getProviderName(), llmService.getCapabilities());
+        }
     }
 
     @Override
     public String processQuery(String query) {
         List<ReActStep> steps = new ArrayList<>();
         
-        // Log da query inicial do usuário
         conversationLogger.info("USER: {}", cleanUserQuery(query));
         
         logger.info("[REACT-DEBUG] Starting ReAct processing for query: {}", query);
@@ -99,15 +105,13 @@ public class ReActInference implements Inference {
                 if (decision.shouldAct()) {
                     steps.add(ReActStep.action(decision.getToolName(), decision.getArgs()));
                     
-                    // Log da ação
                     conversationLogger.info("ACTION_{}: {}({})", iteration + 1, 
                                           decision.getToolName(), formatArgs(decision.getArgs()));
                     
                     // OBSERVATION
-                    String observation = executeFunction(decision.getToolName(), decision.getArgs());
+                    String observation = executeTool(decision.getToolName(), decision.getArgs());
                     steps.add(ReActStep.observation(observation));
                     
-                    // Log da observação
                     conversationLogger.info("OBSERVATION_{}: {}", iteration + 1, cleanObservation(observation));
                 } else {
                     logger.info("[REACT-DEBUG] Decision was not to act");
@@ -127,6 +131,20 @@ public class ReActInference implements Inference {
         return fallbackResult;
     }
 
+    private void initializeAvailableTools() {
+        try {
+            List<Tool> mcpTools = toolManager.getMcpInfo().listAllTools();
+            this.availableToolDefinitions = llmService.convertMcpTools(mcpTools);
+            
+            if (debugMode) {
+                logger.info("[REACT] Initialized {} tools", availableToolDefinitions.size());
+            }
+        } catch (Exception e) {
+            logger.error("[REACT] Failed to initialize tools", e);
+            this.availableToolDefinitions = new ArrayList<>();
+        }
+    }
+
     private String generateThought(String originalQuery, List<ReActStep> steps) {
         StringBuilder prompt = new StringBuilder();
         
@@ -141,264 +159,172 @@ public class ReActInference implements Inference {
             prompt.append("\n");
         }
         
-        // Add available tools info dynamically
-        String toolsInfo = toolManager.getFormattedToolInfo();
+        // Add available tools info using ToolDefinitions
+        String toolsInfo = formatToolsInfo();
         
-        if (debugMode) {
-            logger.info("[REACT-DEBUG] ToolManager.getFormattedToolInfo() returned: {}", 
-                toolsInfo != null ? toolsInfo.substring(0, Math.min(200, toolsInfo.length())) + "..." : "NULL");
+        if (debugMode && toolsInfo != null) {
+            logger.info("[REACT-DEBUG] Tools info length: {}", toolsInfo.length());
         }
         
-        if (toolsInfo != null && !toolsInfo.trim().equals("AVAILABLE TOOLS:") && !toolsInfo.trim().isEmpty()) {
-            prompt.append(toolsInfo).append("\n");
-        } else {
-            // Fallback: get tools directly from MCPInfo
-            List<Tool> allTools = new MCPInfo(mcpServers, mcpService).listAllTools();
-            if (debugMode) {
-                logger.info("[REACT-DEBUG] Fallback: MCPInfo.listAllTools() returned {} tools", allTools.size());
+        prompt.append("AVAILABLE TOOLS:\n").append(toolsInfo).append("\n\n");
+        
+        prompt.append("Now think about the current situation and what to do next.\n");
+        prompt.append("Format: THOUGHT: [your reasoning]\n");
+        prompt.append("If you need to act: ACTION: [tool_name] with arguments [args]\n");
+        prompt.append("If you have the final answer: FINAL ANSWER: [answer]\n\n");
+        prompt.append("THOUGHT:");
+
+        try {
+            LlmResponse response = llmService.generateResponse(prompt.toString());
+            
+            if (!response.isSuccess()) {
+                logger.error("[REACT] Failed to generate thought: {}", response.getErrorMessage());
+                return "Error generating thought: " + response.getErrorMessage();
             }
-            if (!allTools.isEmpty()) {
-                prompt.append("AVAILABLE TOOLS:\n");
-                for (Tool tool : allTools) {
-                    prompt.append("- ").append(tool.name()).append(": ").append(tool.description()).append("\n");
+            
+            return response.getContent();
+            
+        } catch (Exception e) {
+            logger.error("[REACT] Exception in generateThought", e);
+            return "Error: " + e.getMessage();
+        }
+    }
+    
+    private String formatToolsInfo() {
+        if (availableToolDefinitions == null || availableToolDefinitions.isEmpty()) {
+            return "No tools available";
+        }
+        
+        StringBuilder toolsInfo = new StringBuilder();
+        for (ToolDefinition tool : availableToolDefinitions) {
+            toolsInfo.append("- ").append(tool.getName())
+                    .append(": ").append(tool.getDescription());
+                    
+            if (!tool.getParameters().isEmpty()) {
+                toolsInfo.append(" [Parameters: ");
+                List<String> paramInfo = new ArrayList<>();
+                
+                for (Map.Entry<String, Object> param : tool.getParameters().entrySet()) {
+                    String paramName = param.getKey();
+                    Map<String, Object> paramDetails = (Map<String, Object>) param.getValue();
+                    String paramType = (String) paramDetails.get("type");
+                    
+                    String info = paramName + "(" + paramType + ")";
+                    if (tool.getRequired().contains(paramName)) {
+                        info += "*required*";
+                    }
+                    paramInfo.add(info);
                 }
-                prompt.append("\n");
+                
+                toolsInfo.append(String.join(", ", paramInfo)).append("]");
             }
+            toolsInfo.append("\n");
         }
         
-        prompt.append("""
-            Now think about what to do next:
-            - If you need to get weather information, use weather tools
-            - IMPORTANT: Weather tools require latitude and longitude coordinates
-            - Use your knowledge: NYC (40.7128, -74.0060), London (51.5074, -0.1278), etc.
-            - If you need to create/write files, use filesystem tools  
-            - IMPORTANT: All files must be created in C:\\Users\\gazol\\Documents directory
-            - If you have enough information to answer, start your response with "FINAL ANSWER:"
-            - If you need to use a tool, start your response with "NEED ACTION:"
-            
-            Be explicit about your reasoning. What do you need to do?
-            
-            THOUGHT:
-            """);
-        
-        String thought = llmService.generateResponse(prompt.toString(), null);
-        
-        if (debugMode) {
-            logger.info("[REACT-DEBUG] THOUGHT: {}", thought);
-        }
-        
-        return thought;
+        return toolsInfo.toString();
     }
 
     private ActionDecision decideAction(String thought) {
-        String thoughtUpper = thought.toUpperCase();
-        
-        // Check if should act
-        if (!thoughtUpper.contains("NEED ACTION:") && !thoughtUpper.contains("ACTION:") && 
-            !thoughtUpper.contains("USE TOOL") && !thoughtUpper.contains("CALL TOOL")) {
+        try {
+            String prompt = buildActionDecisionPrompt(thought);
+            
+            LlmResponse response = llmService.generateResponse(prompt);
+            
+            if (!response.isSuccess()) {
+                logger.error("[REACT] Failed to decide action: {}", response.getErrorMessage());
+                return ActionDecision.noAction();
+            }
+            
+            return parseActionDecision(response.getContent());
+            
+        } catch (Exception e) {
+            logger.error("[REACT] Exception in decideAction", e);
             return ActionDecision.noAction();
         }
-        
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("Based on your thinking, choose and execute the appropriate action.\n\n");
-        prompt.append("YOUR THOUGHT: ").append(thought).append("\n\n");
-        
-        // Add explicit tool guidance
-        prompt.append("TOOL SELECTION GUIDANCE:\n");
-        prompt.append("- For weather information: use weather-nws tools\n");
-        prompt.append("- IMPORTANT: Weather tools require latitude and longitude coordinates (use your knowledge of world cities)\n");
-        prompt.append("- Example: For NYC use latitude=40.7128, longitude=-74.0060\n");
-        prompt.append("- Example: For London use latitude=51.5074, longitude=-0.1278\n");
-        prompt.append("- For creating/writing files: use filesystem tools\n");
-        prompt.append("- IMPORTANT: Files must be created in C:\\Users\\gazol\\Documents (this is the only allowed directory)\n");
-        prompt.append("- For memory/storage: use memory tools\n\n");
-        
-        String toolsInfo = toolManager.getFormattedToolInfo();
-        if (toolsInfo != null && !toolsInfo.trim().equals("AVAILABLE TOOLS:") && !toolsInfo.trim().isEmpty()) {
-            prompt.append(toolsInfo);
-        } else {
-            // Fallback: get tools directly from MCPInfo
-            List<Tool> allTools = new MCPInfo(mcpServers, mcpService).listAllTools();
-            if (!allTools.isEmpty()) {
-                prompt.append("AVAILABLE TOOLS:\n");
-                for (Tool tool : allTools) {
-                    prompt.append("- ").append(tool.name()).append(": ").append(tool.description()).append("\n");
-                }
-            }
-        }
-        
-        prompt.append("\nRespond with the exact function call format:\n");
-        prompt.append("FUNCTION_CALL:tool_name:{\"parameter\":\"value\"}\n");
-        prompt.append("\nFor weather: FUNCTION_CALL:weather-nws_get-forecast:{\"latitude\":40.7128,\"longitude\":-74.0060}\n");
-        prompt.append("Use your knowledge of world cities to get the correct coordinates.");
-        
-        FunctionDeclaration[] tools = availableMcpTools != null ? availableMcpTools.toArray(new FunctionDeclaration[0]) : new FunctionDeclaration[0];
-        
-        logger.info("[REACT-DEBUG] Available tools for LLM: {} tools", tools.length);
-        if (tools.length > 0) {
-            logger.info("[REACT-DEBUG] First tool for LLM: {}", tools[0].name);
-        }
-        
-        String actionResponse = llmService.generateResponse(prompt.toString(), List.of(tools));
-        
-        if (actionResponse == null || actionResponse.trim().isEmpty()) {
-            logger.warn("[REACT-DEBUG] LLM returned empty response for function calling! Trying without tools...");
-            actionResponse = llmService.generateResponse(
-                prompt.toString() + 
-                "\n\nPlease respond with: FUNCTION_CALL:weather-nws_get-forecast:{\"latitude\":LATITUDE,\"longitude\":LONGITUDE}\n" +
-                "Use your knowledge to provide the correct coordinates for the city mentioned in the thought.", 
-                null
-            );
-        }
-        
-        if (debugMode) {
-            logger.info("[REACT-DEBUG] ACTION PROMPT: {}", prompt.toString());
-            logger.info("[REACT-DEBUG] ACTION RESPONSE: {}", actionResponse);
-        }
-        
-        return parseActionResponse(actionResponse);
     }
 
-    private ActionDecision parseActionResponse(String response) {
-        logger.info("[REACT-DEBUG] Parsing action response: '{}'", response);
+    private String buildActionDecisionPrompt(String thought) {
+        StringBuilder prompt = new StringBuilder();
         
-        if (response == null || response.trim().isEmpty()) {
-            logger.warn("[REACT-DEBUG] Response is null or empty");
+        prompt.append("Based on this thought, decide if you need to take an action:\n\n");
+        prompt.append("THOUGHT: ").append(thought).append("\n\n");
+        
+        prompt.append("AVAILABLE TOOLS:\n");
+        prompt.append(formatToolsInfo()).append("\n");
+        
+        prompt.append("If you need to use a tool, respond with:\n");
+        prompt.append("ACTION: tool_name\n");
+        prompt.append("ARGS: {\"param1\": \"value1\", \"param2\": \"value2\"}\n\n");
+        prompt.append("If no action is needed, respond with:\n");
+        prompt.append("NO ACTION\n\n");
+        
+        prompt.append("Response:");
+        
+        return prompt.toString();
+    }
+
+    private ActionDecision parseActionDecision(String response) {
+        try {
+            if (response.toUpperCase().contains("NO ACTION")) {
+                return ActionDecision.noAction();
+            }
+            
+            String[] lines = response.split("\n");
+            String toolName = null;
+            Map<String, Object> args = null;
+            
+            for (String line : lines) {
+                line = line.trim();
+                if (line.startsWith("ACTION:")) {
+                    toolName = line.substring(7).trim();
+                } else if (line.startsWith("ARGS:")) {
+                    String argsJson = line.substring(5).trim();
+                    args = objectMapper.readValue(argsJson, Map.class);
+                }
+            }
+            
+            if (toolName != null) {
+                return ActionDecision.action(toolName, args != null ? args : Map.of());
+            } else {
+                return ActionDecision.noAction();
+            }
+            
+        } catch (Exception e) {
+            logger.error("[REACT] Failed to parse action decision: {}", response, e);
             return ActionDecision.noAction();
         }
-        
+    }
+
+    private String executeTool(String toolName, Map<String, Object> args) {
         try {
-            // Check FUNCTION_CALL format
-            if (response.startsWith("FUNCTION_CALL:")) {
-                String[] parts = response.split(":", 3);
-                if (parts.length >= 3) {
-                    String functionName = parts[1];
-                    String argsJson = parts[2];
-                    Map<String, Object> arguments = objectMapper.readValue(argsJson, Map.class);
-                    logger.info("[REACT-DEBUG] Parsed FUNCTION_CALL: {}({})", functionName, arguments);
-                    return ActionDecision.action(functionName, arguments);
-                }
+            if (debugMode) {
+                logger.info("[REACT] Executing tool: {} with args: {}", toolName, args);
             }
             
-            // Check JSON array format
-            if (response.trim().startsWith("[")) {
-                JsonNode jsonArray = objectMapper.readTree(response.trim());
-                if (jsonArray.isArray() && jsonArray.size() > 0) {
-                    JsonNode firstCall = jsonArray.get(0);
-                    if (firstCall.has("name") && firstCall.has("parameters")) {
-                        String functionName = firstCall.get("name").asText();
-                        JsonNode paramsNode = firstCall.get("parameters");
-                        Map<String, Object> arguments = objectMapper.convertValue(paramsNode, Map.class);
-                        logger.info("[REACT-DEBUG] Parsed JSON array: {}({})", functionName, arguments);
-                        return ActionDecision.action(functionName, arguments);
-                    }
+            ToolOperationResult result = toolManager.validateAndExecute(toolName, args);
+            
+            if (result.isSuccess()) {
+                return result.getResult();
+            } else {
+                String errorMsg = result.getErrorMessage();
+                if (result.getSuggestions() != null && !result.getSuggestions().isEmpty()) {
+                    errorMsg += ". Suggestions: " + String.join(", ", result.getSuggestions());
                 }
+                return "Error: " + errorMsg;
             }
             
-           
         } catch (Exception e) {
-            logger.warn("[REACT-DEBUG] Error parsing action response: {}", e.getMessage());
+            logger.error("[REACT] Exception executing tool: {}", toolName, e);
+            return "Tool execution failed: " + e.getMessage();
         }
-        
-        logger.warn("[REACT-DEBUG] Could not parse action response, returning noAction");
-        return ActionDecision.noAction();
     }
 
     private String extractFinalAnswer(String thought) {
-        logger.info("[REACT-DEBUG] Extracting final answer from: {}", thought);
-        
-        if (thought == null || thought.trim().isEmpty()) {
-            logger.warn("[REACT-DEBUG] Thought is null or empty");
-            return "No final answer could be extracted";
+        int index = thought.toUpperCase().indexOf("FINAL ANSWER:");
+        if (index != -1) {
+            return thought.substring(index + 13).trim();
         }
-        
-        // Look for FINAL ANSWER: and extract everything after it
-        String upperThought = thought.toUpperCase();
-        int finalAnswerIndex = upperThought.indexOf("FINAL ANSWER:");
-        
-        if (finalAnswerIndex != -1) {
-            // Extract everything after "FINAL ANSWER:"
-            String answer = thought.substring(finalAnswerIndex + "FINAL ANSWER:".length()).trim();
-            logger.info("[REACT-DEBUG] Extracted answer: {}", answer);
-            return answer.isEmpty() ? thought : answer;
-        }
-        
-        // Fallback: look line by line (old method)
-        String[] lines = thought.split("\\n");
-        for (String line : lines) {
-            if (line.toUpperCase().contains("FINAL ANSWER:")) {
-                String answer = line.substring(line.toUpperCase().indexOf("FINAL ANSWER:") + "FINAL ANSWER:".length()).trim();
-                logger.info("[REACT-DEBUG] Extracted answer from line: {}", answer);
-                return answer.isEmpty() ? thought : answer;
-            }
-        }
-        
-        logger.info("[REACT-DEBUG] No FINAL ANSWER found, returning full thought");
         return thought;
-    }
-
-    private String executeFunction(String functionName, Map<String, Object> args) {
-        ToolOperationResult result = toolManager.validateAndExecute(functionName, args);
-        
-        if (debugMode) {
-            logger.info("[REACT-DEBUG] ACTION: {}({})", functionName, args);
-            logger.info("[REACT-DEBUG] OBSERVATION: {}", result.isSuccess() ? result.getResult() : result.getErrorMessage());
-        }
-        
-        if (result.isSuccess()) {
-            return result.getResult();
-        } else {
-            String errorMsg = result.getErrorMessage();
-            if (result.getSuggestions() != null && !result.getSuggestions().isEmpty()) {
-                errorMsg += ". Try these alternatives: " + String.join(", ", result.getSuggestions());
-            }
-            return errorMsg;
-        }
-    }
-
-    private void initializeAvailableMcpTools() {
-        if (mcpServers == null) return;
-        
-        try {
-            availableMcpTools = new ArrayList<>();
-            
-            for (Map.Entry<String, McpSyncClient> entry : mcpServers.mcpClients.entrySet()) {
-                String serverName = entry.getKey();
-                McpSyncClient client = entry.getValue();
-                
-                try {
-                    ListToolsResult toolsResult = client.listTools();
-                    List<io.modelcontextprotocol.spec.McpSchema.Tool> serverTools = toolsResult.tools();
-                    
-                    for (io.modelcontextprotocol.spec.McpSchema.Tool mcpTool : serverTools) {
-                        String toolName = mcpTool.name();
-                        String namespacedToolName = serverName + "_" + toolName;
-                        
-                        try {
-                            FunctionDeclaration geminiFunction = llmService.convertMcpToolToFunction(mcpTool, namespacedToolName);
-                            if (geminiFunction != null) {
-                                availableMcpTools.add(geminiFunction);
-                                if (debugMode) {
-                                    logger.info("[REACT-DEBUG] Added tool: {} -> {}", toolName, namespacedToolName);
-                                }
-                            }
-                        } catch (Exception e) {
-                            logger.warn("[REACT-DEBUG] Failed to convert tool {}: {}", toolName, e.getMessage());
-                        }
-                    }
-                } catch (Exception e) {
-                    logger.warn("[REACT-DEBUG] Failed to get tools from server {}: {}", serverName, e.getMessage());
-                }
-            }
-            
-            if (debugMode) {
-                logger.info("[REACT-DEBUG] Initialized {} MCP tools for LLM", availableMcpTools.size());
-            }
-            
-        } catch (Exception e) {
-            logger.error("Erro ao inicializar ferramentas MCP", e);
-            availableMcpTools = new ArrayList<>();
-        }
     }
 
     public void setConversationMemory(Object memory) {
@@ -408,103 +334,41 @@ public class ReActInference implements Inference {
     @Override
     public String buildSystemPrompt() {
         StringBuilder prompt = new StringBuilder();
-        
-        prompt.append("""
-            You are a ReAct (Reasoning + Acting) agent. You work in cycles of THOUGHT → ACTION → OBSERVATION.
-            
-            IMPORTANT RULES:
-            - Think before acting
-            - Act only when necessary  
-            - Continue until you have enough information to answer
-            - Use "NEED ACTION:" when you need tools
-            - Use "FINAL ANSWER:" when you can answer
-            
-            """);
-        
-        // Add available tools info
-        String toolsInfo = toolManager.getFormattedToolInfo();
-        if (toolsInfo != null && !toolsInfo.trim().equals("AVAILABLE TOOLS:") && !toolsInfo.trim().isEmpty()) {
-            prompt.append(toolsInfo).append("\n");
-        } else {
-            // Fallback: get tools directly from MCPInfo  
-            List<Tool> allTools = new MCPInfo(mcpServers, mcpService).listAllTools();
-            if (!allTools.isEmpty()) {
-                prompt.append("AVAILABLE TOOLS:\n");
-                for (Tool tool : allTools) {
-                    prompt.append("- ").append(tool.name()).append(": ").append(tool.description()).append("\n");
-                }
-                prompt.append("\n");
-            }
-        }
-        
+        prompt.append("You are a ReAct (Reasoning + Acting) agent. ");
+        prompt.append("Think step by step and use available tools when needed.\n\n");
+        prompt.append("Available Tools:\n");
+        prompt.append(formatToolsInfo());
         return prompt.toString();
     }
 
     @Override
     public void close() {
-        // Nothing to close
+        // No resources to close
     }
     
-    /**
-     * Limpa a query do usuário removendo prompts de sistema
-     */
+    // Helper methods for logging and cleaning
+    
     private String cleanUserQuery(String query) {
         if (query == null || query.trim().isEmpty()) {
             return "[EMPTY_QUERY]";
         }
-        
-        // Se é muito longo e contém markers de sistema, extrair query real
-        if (query.length() > 500 && containsSystemPromptMarkers(query)) {
-            String[] lines = query.split("\n");
-            for (String line : lines) {
-                line = line.trim();
-                if (!line.isEmpty() && 
-                    !line.startsWith("You are") &&
-                    !line.startsWith("AVAILABLE TOOLS") &&
-                    !line.startsWith("INSTRUCTIONS") &&
-                    !line.startsWith("USER QUERY:") &&
-                    !line.contains("ORIGINAL QUESTION:") &&
-                    !line.contains("THOUGHT:") &&
-                    !line.contains("ACTION:")) {
-                    return line.length() > 200 ? line.substring(0, 200) + "..." : line;
-                }
-            }
-        }
-        
         return query.length() > 200 ? query.substring(0, 200) + "..." : query;
     }
     
-    /**
-     * Limpa o pensamento removendo prefixos técnicos
-     */
     private String cleanThought(String thought) {
         if (thought == null || thought.trim().isEmpty()) {
             return "[EMPTY_THOUGHT]";
         }
-        
-        // Remove prefixos comuns
-        String cleaned = thought;
-        if (cleaned.startsWith("THOUGHT:")) {
-            cleaned = cleaned.substring("THOUGHT:".length()).trim();
-        }
-        
-        return cleaned.length() > 300 ? cleaned.substring(0, 300) + "..." : cleaned;
+        return thought.length() > 300 ? thought.substring(0, 300) + "..." : thought;
     }
     
-    /**
-     * Limpa observação truncando se muito longa
-     */
     private String cleanObservation(String observation) {
         if (observation == null || observation.trim().isEmpty()) {
             return "[EMPTY_OBSERVATION]";
         }
-        
         return observation.length() > 400 ? observation.substring(0, 400) + "..." : observation;
     }
     
-    /**
-     * Formata argumentos para log
-     */
     private String formatArgs(Map<String, Object> args) {
         if (args == null || args.isEmpty()) {
             return "{}";
@@ -515,24 +379,5 @@ public class ReActInference implements Inference {
         } catch (Exception e) {
             return args.toString();
         }
-    }
-    
-    /**
-     * Verifica se contém marcadores de prompt de sistema
-     */
-    private boolean containsSystemPromptMarkers(String text) {
-        String[] markers = {
-            "You are", "AVAILABLE TOOLS", "INSTRUCTIONS", "ReAct", 
-            "EXECUTION HISTORY", "TOOL SELECTION GUIDANCE"
-        };
-        
-        String upperText = text.toUpperCase();
-        for (String marker : markers) {
-            if (upperText.contains(marker.toUpperCase())) {
-                return true;
-            }
-        }
-        
-        return false;
     }
 }

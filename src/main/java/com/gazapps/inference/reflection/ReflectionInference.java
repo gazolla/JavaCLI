@@ -9,10 +9,12 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gazapps.config.Config;
+import com.gazapps.core.ChatEngineBuilder;
 import com.gazapps.core.ConversationMemory;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
-import com.gazapps.llm.function.FunctionDeclaration;
+import com.gazapps.llm.LlmResponse;
+import com.gazapps.llm.tool.ToolDefinition;
 import com.gazapps.mcp.MCPInfo;
 import com.gazapps.mcp.MCPServers;
 import com.gazapps.mcp.MCPService;
@@ -22,7 +24,8 @@ import com.gazapps.mcp.ToolManager.ToolOperationResult;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 /**
- * Implementação do padrão Reflection para auto-avaliação e melhoria iterativa de respostas.
+ * ReflectionInference refatorada para usar a nova interface Llm.
+ * Implementa o padrão Reflection para auto-avaliação e melhoria iterativa de respostas.
  * 
  * O processo funciona em ciclos:
  * 1. Gera resposta inicial
@@ -47,14 +50,13 @@ public class ReflectionInference implements Inference, AutoCloseable {
     private ConversationMemory conversationMemory;
     private final List<ReflectionStep> currentSteps;
     private final MCPInfo mcpInfo;
-    private List<FunctionDeclaration> availableTools;
+    private List<ToolDefinition> availableTools;
     
     @Override
-    public String getStrategyName() {
-        return "reflection";
+    public ChatEngineBuilder.InferenceStrategy getStrategyName() {
+        return ChatEngineBuilder.InferenceStrategy.REFLECTION;
     }
 
-    
     public ReflectionInference(Llm llm, MCPService mcpService, MCPServers mcpServers, 
                               int maxIterations, boolean debug) {
         this.llm = llm;
@@ -67,6 +69,11 @@ public class ReflectionInference implements Inference, AutoCloseable {
         this.currentSteps = new ArrayList<>();
         this.mcpInfo = new MCPInfo(mcpServers, mcpService);
         this.availableTools = initializeTools();
+        
+        if (debug) {
+            logger.info("[REFLECTION] Initialized with LLM provider: {}, capabilities: {}", 
+                       llm.getProviderName(), llm.getCapabilities());
+        }
         
         logger.info("ReflectionInference initialized - maxIterations: {}, scoreThreshold: {}, debug: {}", 
                    this.maxIterations, this.scoreThreshold, this.debug);
@@ -88,441 +95,301 @@ public class ReflectionInference implements Inference, AutoCloseable {
         return "You are a helpful AI assistant with reflection capabilities. You analyze and improve responses iteratively.";
     }
     
-    private List<FunctionDeclaration> initializeTools() {
+    private List<ToolDefinition> initializeTools() {
         try {
-            List<FunctionDeclaration> tools = new ArrayList<>();
             List<Tool> mcpTools = mcpInfo.listAllTools();
+            return llm.convertMcpTools(mcpTools);
             
-            for (Tool tool : mcpTools) {
-                String toolName = tool.name();
-                FunctionDeclaration funcDecl = llm.convertMcpToolToFunction(tool, toolName);
-                tools.add(funcDecl);
-            }
-            
-            return tools;
         } catch (Exception e) {
-            logger.warn("Failed to initialize tools: {}", e.getMessage());
+            logger.error("[REFLECTION] Failed to initialize tools", e);
             return new ArrayList<>();
         }
     }
     
     @Override
     public String processQuery(String query) {
-        if (query == null || query.trim().isEmpty()) {
-            throw new IllegalArgumentException("Query cannot be null or empty");
-        }
-        
-        // Log da query inicial do usuário
         conversationLogger.info("USER: {}", cleanUserQuery(query));
         
-        long startTime = System.currentTimeMillis();
+        if (debug) {
+            logger.info("[REFLECTION] Processing query with {}: {}", llm.getProviderName(), query);
+        }
+        
         currentSteps.clear();
         
         try {
-            logger.info("Starting reflection cycle for query: {}", query.substring(0, Math.min(50, query.length())));
+            // Gerar resposta inicial
+            String currentResponse = generateInitialResponse(query);
+            ReflectionStep initialStep = new ReflectionStep(ReflectionStep.StepType.INITIAL_RESPONSE, currentResponse, 0);
+            currentSteps.add(initialStep);
             
-            // 1. Preparar contexto de ferramentas
-            String toolContext = buildToolContext();
-            
-            // 2. Gerar resposta inicial
-            String currentResponse = generateInitialResponse(query, toolContext);
-            currentSteps.add(new ReflectionStep(ReflectionStep.StepType.INITIAL_RESPONSE, currentResponse, 0));
-            
-            // Log da resposta inicial
             conversationLogger.info("INITIAL_RESPONSE: {}", cleanResponse(currentResponse));
             
-            if (debug) {
-                logger.debug("Initial response generated (length: {})", currentResponse.length());
-            }
-            
-            // 3. Ciclo de reflexão
-            int iteration = 1;
-            while (iteration <= maxIterations) {
-                
-                // Avaliar resposta atual
-                ReflectionResult evaluation = evaluateResponse(query, currentResponse, toolContext);
-                currentSteps.add(new ReflectionStep(ReflectionStep.StepType.EVALUATION, "", evaluation, iteration));
-                
-                // Log da avaliação
-                conversationLogger.info("EVALUATION_{}: Score: {:.1f}/10, Needs improvement: {}", 
-                                      iteration, evaluation.getOverallScore(), evaluation.needsImprovement());
-                
+            // Ciclo de reflexão
+            for (int iteration = 1; iteration <= maxIterations; iteration++) {
                 if (debug) {
-                    logger.debug("Iteration {}: Evaluation complete - score: {:.2f}, needs_improvement: {}", 
-                               iteration, evaluation.getOverallScore(), evaluation.needsImprovement());
+                    logger.info("[REFLECTION] Iteration {}/{}", iteration, maxIterations);
                 }
                 
-                // Verificar se deve continuar
-                if (!shouldContinueIteration(evaluation, iteration)) {
+                // Avaliar resposta atual
+                ReflectionResult evaluation = evaluateResponse(query, currentResponse);
+                ReflectionStep evaluationStep = new ReflectionStep(ReflectionStep.StepType.EVALUATION, 
+                                                                  evaluation.getFeedback(), iteration);
+                currentSteps.add(evaluationStep);
+                
+                conversationLogger.info("EVALUATION_{}: score={}, feedback={}", 
+                                       iteration, evaluation.getScore(), cleanFeedback(evaluation.getFeedback()));
+                
+                if (debug) {
+                    logger.info("[REFLECTION] Evaluation score: {}, threshold: {}", 
+                               evaluation.getScore(), scoreThreshold);
+                }
+                
+                // Verificar se a qualidade é satisfatória
+                if (evaluation.getScore() >= scoreThreshold) {
+                    conversationLogger.info("ASSISTANT: {}", cleanResponse(currentResponse));
                     if (debug) {
-                        logger.debug("Reflection complete - score: {:.2f} meets threshold: {:.2f}", 
-                                   evaluation.getOverallScore(), scoreThreshold);
+                        logger.info("[REFLECTION] Score threshold met, returning response");
                     }
-                    break;
+                    return currentResponse;
                 }
                 
                 // Gerar versão melhorada
-                String improvedResponse = improveResponse(query, currentResponse, evaluation, toolContext);
-                currentSteps.add(new ReflectionStep(ReflectionStep.StepType.IMPROVEMENT, improvedResponse, iteration));
+                String improvedResponse = improveResponse(query, currentResponse, evaluation.getFeedback());
+                ReflectionStep improvementStep = new ReflectionStep(ReflectionStep.StepType.IMPROVEMENT, 
+                                                                  improvedResponse, iteration);
+                currentSteps.add(improvementStep);
                 
-                // Log da resposta melhorada
-                conversationLogger.info("IMPROVED_{}: {}", iteration, cleanResponse(improvedResponse));
+                conversationLogger.info("IMPROVEMENT_{}: {}", iteration, cleanResponse(improvedResponse));
                 
                 currentResponse = improvedResponse;
-                iteration++;
-                
-                if (debug) {
-                    logger.debug("Iteration {}: Improvement generated (length: {})", iteration - 1, improvedResponse.length());
-                }
             }
             
-            // Resposta final
-            currentSteps.add(new ReflectionStep(ReflectionStep.StepType.FINAL, currentResponse, iteration));
-            
-            // Log da resposta final
+            // Retornar a melhor resposta encontrada
             conversationLogger.info("ASSISTANT: {}", cleanResponse(currentResponse));
-            
-            long endTime = System.currentTimeMillis();
-            logger.info("Reflection completed: {} iterations, {} steps, {:.2f}s", 
-                       iteration - 1, currentSteps.size(), (endTime - startTime) / 1000.0);
-            
+            if (debug) {
+                logger.info("[REFLECTION] Max iterations reached, returning final response");
+            }
             return currentResponse;
             
-        } catch (ReflectionException e) {
-            conversationLogger.info("ERROR: Reflection failed - {}", e.toString());
-            logger.error("Reflection failed: {}", e.toString());
-            throw e;
         } catch (Exception e) {
-            conversationLogger.info("ERROR: Unexpected error - {}", e.getMessage());
-            logger.error("Unexpected error in reflection process: {}", e.getMessage(), e);
-            throw new ReflectionException("Unexpected error in reflection process: " + e.getMessage(), "process", -1, query);
+            String errorMsg = "Reflection process failed: " + e.getMessage();
+            conversationLogger.info("ERROR: {}", errorMsg);
+            logger.error("[REFLECTION] Error processing query", e);
+            return errorMsg;
         }
     }
     
-    /**
-     * Gera resposta inicial usando contexto de ferramentas
-     */
-    private String generateInitialResponse(String query, String toolContext) {
+    private String generateInitialResponse(String query) {
         try {
-            String prompt = ReflectionCriteria.buildInitialPrompt(query, toolContext);
-            String response = llm.generateResponse(prompt, availableTools);
+            String prompt = buildInitialPrompt(query);
             
-            if (response == null || response.trim().isEmpty()) {
-                throw ReflectionException.evaluationFailed("Empty response from LLM", 0);
+            LlmResponse response = llm.generateWithTools(prompt, availableTools);
+            
+            if (!response.isSuccess()) {
+                throw new RuntimeException("Failed to generate initial response: " + response.getErrorMessage());
             }
             
-            // KISS: Copy function calling logic from SimpleSequential
-            return processResponseWithTools(response, query);
-            
-        } catch (Exception e) {
-            throw new ReflectionException("Failed to generate initial response: " + e.getMessage(), "initial", 0, query);
-        }
-    }
-    
-    /**
-     * Avalia qualidade da resposta atual
-     */
-    private ReflectionResult evaluateResponse(String query, String response, String toolContext) {
-        try {
-            String evaluationPrompt = ReflectionCriteria.buildEvaluationPrompt(query, response, toolContext);
-            String evaluationResponse = llm.generateResponse(evaluationPrompt, new ArrayList<>());
-            
-            if (evaluationResponse == null || evaluationResponse.trim().isEmpty()) {
-                throw ReflectionException.evaluationFailed("Empty evaluation response from LLM", -1);
-            }
-            
-            return ReflectionResult.parse(evaluationResponse);
-            
-        } catch (ReflectionException e) {
-            throw e; // Re-throw reflection exceptions
-        } catch (Exception e) {
-            throw ReflectionException.evaluationFailed("Error during evaluation: " + e.getMessage(), -1);
-        }
-    }
-    
-    /**
-     * Gera versão melhorada da resposta baseada na avaliação
-     */
-    private String improveResponse(String query, String response, ReflectionResult evaluation, String toolContext) {
-        try {
-            String improvementPrompt = ReflectionCriteria.buildImprovementPrompt(query, response, evaluation, toolContext);
-            String improvedResponse = llm.generateResponse(improvementPrompt, availableTools);
-            
-            if (improvedResponse == null || improvedResponse.trim().isEmpty()) {
-                throw ReflectionException.improvementFailed("Empty improvement response from LLM", -1);
-            }
-            
-            // KISS: Also process tools in improvements
-            return processResponseWithTools(improvedResponse, query);
-            
-        } catch (ReflectionException e) {
-            throw e; // Re-throw reflection exceptions
-        } catch (Exception e) {
-            throw ReflectionException.improvementFailed("Error during improvement: " + e.getMessage(), -1);
-        }
-    }
-    
-    /**
-     * Determina se deve continuar com mais iterações
-     */
-    private boolean shouldContinueIteration(ReflectionResult evaluation, int currentIteration) {
-        // Parar se atingiu max iterações
-        if (currentIteration >= maxIterations) {
-            return false;
-        }
-        
-        // Parar se score é satisfatório
-        if (evaluation.getOverallScore() >= scoreThreshold) {
-            return false;
-        }
-        
-        // Continuar se precisa de melhoria
-        return evaluation.needsImprovement();
-    }
-    
-    /**
-     * Constrói contexto das ferramentas MCP disponíveis
-     */
-    private String buildToolContext() {
-        StringBuilder context = new StringBuilder();
-        context.append("Available tools and their capabilities:\n");
-        
-        try {
-            List<Tool> allTools = mcpInfo.listAllTools();
-            if (allTools.isEmpty()) {
-                context.append("- No external tools currently available\n");
+            // Se houver tool calls, executar e incorporar resultados
+            if (response.hasToolCalls()) {
+                return executeToolsAndGenerateResponse(query, response);
             } else {
-                for (Tool tool : allTools) {
-                    context.append(String.format("- %s: %s\n", 
-                                 tool.name(), 
-                                 tool.description()));
-                }
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to build tool context: {}", e.getMessage());
-            context.append("- Error loading tool information\n");
-        }
-        
-        return context.toString();
-    }
-    
-    /**
-     * Identifica ferramentas relevantes para a query (para futuras otimizações)
-     */
-    @SuppressWarnings("unused")
-    private List<String> identifyRelevantTools(String query) {
-        List<String> relevantTools = new ArrayList<>();
-        
-        try {
-            String queryLower = query.toLowerCase();
-            
-            // Buscar por palavras-chave específicas
-            if (queryLower.contains("file") || queryLower.contains("arquivo")) {
-                List<Tool> fileTools = mcpInfo.listToolsByKeyWord("file");
-                fileTools.forEach(tool -> relevantTools.add(tool.name()));
-            }
-            
-            if (queryLower.contains("weather") || queryLower.contains("clima")) {
-                List<Tool> weatherTools = mcpInfo.listToolsByKeyWord("weather");
-                weatherTools.forEach(tool -> relevantTools.add(tool.name()));
-            }
-            
-            if (queryLower.contains("remember") || queryLower.contains("memory") || queryLower.contains("lembrar")) {
-                List<Tool> memoryTools = mcpInfo.listToolsByKeyWord("memory");
-                memoryTools.forEach(tool -> relevantTools.add(tool.name()));
+                return response.getContent();
             }
             
         } catch (Exception e) {
-            logger.warn("Failed to identify relevant tools: {}", e.getMessage());
+            logger.error("[REFLECTION] Failed to generate initial response", e);
+            return "Error generating initial response: " + e.getMessage();
         }
+    }
+    
+    private String executeToolsAndGenerateResponse(String originalQuery, LlmResponse toolResponse) {
+        StringBuilder resultBuilder = new StringBuilder();
         
-        return relevantTools;
-    }
-    
-    /**
-     * Retorna steps do processo atual (para debug/análise)
-     */
-    public List<ReflectionStep> getCurrentSteps() {
-        return new ArrayList<>(currentSteps);
-    }
-    
-    /**
-     * Retorna configurações atuais
-     */
-    public Map<String, Object> getConfiguration() {
-        return Map.of(
-            "maxIterations", maxIterations,
-            "scoreThreshold", scoreThreshold,
-            "debug", debug,
-            "llmProvider", llm.getProviderName()
-        );
-    }
-    
-    /**
-     * KISS: Copy function calling logic from SimpleSequential
-     */
-    private String processResponseWithTools(String response, String query) {
-        try {
-            // Check for function calls in different formats
-            if (response.startsWith("FUNCTION_CALL:")) {
-                String[] parts = response.split(":", 3);
-                if (parts.length >= 3) {
-                    String functionName = parts[1];
-                    String argsJson = parts[2];
-                    Map<String, Object> arguments = objectMapper.readValue(argsJson, Map.class);
-                    
-                    String toolResult = executeFunction(functionName, arguments);
-                    return processToolResult(query, functionName, toolResult);
-                }
-            }
-            
-            // Check for JSON array function calls (Groq format)
-            if (response.trim().startsWith("[") && response.contains("name") && response.contains("parameters")) {
-                try {
-                    String cleanedResponse = response.trim();
-                    com.fasterxml.jackson.databind.JsonNode jsonArray = objectMapper.readTree(cleanedResponse);
-                    if (jsonArray.isArray() && jsonArray.size() > 0) {
-                        com.fasterxml.jackson.databind.JsonNode firstCall = jsonArray.get(0);
-                        if (firstCall.has("name") && firstCall.has("parameters")) {
-                            String functionName = firstCall.get("name").asText();
-                            com.fasterxml.jackson.databind.JsonNode paramsNode = firstCall.get("parameters");
-                            Map<String, Object> arguments = objectMapper.convertValue(paramsNode, Map.class);
-                            
-                            String toolResult = executeFunction(functionName, arguments);
-                            return processToolResult(query, functionName, toolResult);
-                        }
-                    }
-                } catch (Exception jsonEx) {
-                    logger.warn("Error parsing JSON function call: " + jsonEx.getMessage());
-                }
-            }
-            
-            return response.trim();
-            
-        } catch (Exception e) {
-            logger.error("Error processing response with tools: " + e.getMessage());
-            return response.trim();
-        }
-    }
-    
-    /**
-    * Executa ferramenta MCP usando mapeamento de nome simples para namespace
-    */
-    private String executeFunction(String functionName, Map<String, Object> args) {
-    try {
-    // Primeiro, tentar obter o nome com namespace
-    String namespacedToolName = mcpServers.getNamespacedToolName(functionName);
-    
-    if (namespacedToolName == null) {
-      // Fallback: talvez já seja um nome com namespace
-     namespacedToolName = functionName;
-    }
-    
-     // Usar MCPInfo para execução
-      return mcpInfo.executeTool(namespacedToolName, args);
-			
-		} catch (Exception e) {
-			String errorMsg = "Tool execution failed: " + e.getMessage();
-			logger.error(errorMsg, e);
-			return errorMsg;
-		}
-	}
-    
-    /**
-     * KISS: Copy from SimpleSequential
-     */
-    private String processToolResult(String originalQuery, String toolName, String toolResult) {
-        try {
-            String processingPrompt = String.format("""
-                You are processing tool results. Create a natural, conversational response in Portuguese.
+        for (var toolCall : toolResponse.getToolCalls()) {
+            try {
+                ToolOperationResult result = toolManager.validateAndExecute(
+                    toolCall.getToolName(), toolCall.getArguments());
                 
-                ORIGINAL QUESTION: "%s"
-                TOOL USED: %s
-                TOOL RESULT:
-                %s
-                
-                Create a helpful response based on the tool results.
-                """, originalQuery, toolName, toolResult);
+                if (result.isSuccess()) {
+                    resultBuilder.append("Tool ").append(toolCall.getToolName())
+                                 .append(" result: ").append(result.getResult()).append("\n");
+                } else {
+                    resultBuilder.append("Tool ").append(toolCall.getToolName())
+                                 .append(" failed: ").append(result.getErrorMessage()).append("\n");
+                }
+            } catch (Exception e) {
+                resultBuilder.append("Tool ").append(toolCall.getToolName())
+                             .append(" error: ").append(e.getMessage()).append("\n");
+            }
+        }
+        
+        // Gerar resposta final baseada nos resultados das ferramentas
+        String finalPrompt = String.format(
+            "User query: %s\n\nTool results:\n%s\n\nProvide a comprehensive response based on the tool results:",
+            originalQuery, resultBuilder.toString());
             
-            String response = llm.generateResponse(processingPrompt, null);
-            return response != null && !response.isEmpty() ? response : "Tool executed successfully.";
+        try {
+            LlmResponse finalResponse = llm.generateResponse(finalPrompt);
+            return finalResponse.isSuccess() ? finalResponse.getContent() : 
+                   "Error generating final response: " + finalResponse.getErrorMessage();
+        } catch (Exception e) {
+            return "Error generating final response: " + e.getMessage();
+        }
+    }
+    
+    private String buildInitialPrompt(String query) {
+        StringBuilder prompt = new StringBuilder();
+        
+        prompt.append("Please provide a helpful and accurate response to the following query:\n\n");
+        prompt.append("Query: ").append(query).append("\n\n");
+        
+        if (!availableTools.isEmpty()) {
+            prompt.append("You have access to the following tools if needed:\n");
+            for (ToolDefinition tool : availableTools) {
+                prompt.append("- ").append(tool.getName()).append(": ").append(tool.getDescription()).append("\n");
+            }
+            prompt.append("\n");
+        }
+        
+        prompt.append("Response:");
+        
+        return prompt.toString();
+    }
+    
+    private ReflectionResult evaluateResponse(String originalQuery, String response) {
+        try {
+            String evaluationPrompt = buildEvaluationPrompt(originalQuery, response);
+            
+            LlmResponse llmResponse = llm.generateResponse(evaluationPrompt);
+            
+            if (!llmResponse.isSuccess()) {
+                throw new RuntimeException("Failed to evaluate response: " + llmResponse.getErrorMessage());
+            }
+            
+            return parseEvaluationResult(llmResponse.getContent());
             
         } catch (Exception e) {
-            return "Tool result: " + toolResult;
+            logger.error("[REFLECTION] Failed to evaluate response", e);
+            return new ReflectionResult(0.5, "Evaluation failed: " + e.getMessage());
         }
+    }
+    
+    private String buildEvaluationPrompt(String originalQuery, String response) {
+        StringBuilder prompt = new StringBuilder();
+        
+        prompt.append("Evaluate the quality of this response to the given query.\n\n");
+        prompt.append("Original Query: ").append(originalQuery).append("\n\n");
+        prompt.append("Response to Evaluate: ").append(response).append("\n\n");
+        
+        prompt.append("Rate the response on a scale of 0.0 to 1.0 based on:\n");
+        prompt.append("- Accuracy and correctness\n");
+        prompt.append("- Completeness and thoroughness\n");
+        prompt.append("- Clarity and helpfulness\n");
+        prompt.append("- Relevance to the query\n\n");
+        
+        prompt.append("Provide your evaluation in this format:\n");
+        prompt.append("SCORE: [0.0-1.0]\n");
+        prompt.append("FEEDBACK: [detailed feedback on how to improve]\n\n");
+        
+        prompt.append("Evaluation:");
+        
+        return prompt.toString();
+    }
+    
+    private ReflectionResult parseEvaluationResult(String evaluationText) {
+        try {
+            double score = 0.5; // default
+            String feedback = "No feedback provided";
+            
+            String[] lines = evaluationText.split("\n");
+            for (String line : lines) {
+                line = line.trim();
+                if (line.startsWith("SCORE:")) {
+                    String scoreStr = line.substring(6).trim();
+                    score = Double.parseDouble(scoreStr);
+                } else if (line.startsWith("FEEDBACK:")) {
+                    feedback = line.substring(9).trim();
+                }
+            }
+            
+            return new ReflectionResult(score, feedback);
+            
+        } catch (Exception e) {
+            logger.error("[REFLECTION] Failed to parse evaluation result: {}", evaluationText, e);
+            return new ReflectionResult(0.5, "Failed to parse evaluation: " + e.getMessage());
+        }
+    }
+    
+    private String improveResponse(String originalQuery, String previousResponse, String feedback) {
+        try {
+            String improvementPrompt = buildImprovementPrompt(originalQuery, previousResponse, feedback);
+            
+            LlmResponse response = llm.generateWithTools(improvementPrompt, availableTools);
+            
+            if (!response.isSuccess()) {
+                throw new RuntimeException("Failed to improve response: " + response.getErrorMessage());
+            }
+            
+            // Se houver tool calls, executar e incorporar resultados
+            if (response.hasToolCalls()) {
+                return executeToolsAndGenerateResponse(originalQuery, response);
+            } else {
+                return response.getContent();
+            }
+            
+        } catch (Exception e) {
+            logger.error("[REFLECTION] Failed to improve response", e);
+            return previousResponse; // Fallback para resposta anterior
+        }
+    }
+    
+    private String buildImprovementPrompt(String originalQuery, String previousResponse, String feedback) {
+        StringBuilder prompt = new StringBuilder();
+        
+        prompt.append("Improve the following response based on the feedback provided.\n\n");
+        prompt.append("Original Query: ").append(originalQuery).append("\n\n");
+        prompt.append("Previous Response: ").append(previousResponse).append("\n\n");
+        prompt.append("Feedback for Improvement: ").append(feedback).append("\n\n");
+        
+        if (!availableTools.isEmpty()) {
+            prompt.append("You have access to the following tools if needed:\n");
+            for (ToolDefinition tool : availableTools) {
+                prompt.append("- ").append(tool.getName()).append(": ").append(tool.getDescription()).append("\n");
+            }
+            prompt.append("\n");
+        }
+        
+        prompt.append("Provide an improved response that addresses the feedback:\n\n");
+        prompt.append("Improved Response:");
+        
+        return prompt.toString();
     }
     
     @Override
     public void close() {
         currentSteps.clear();
-        logger.info("ReflectionInference closed");
     }
     
-    /**
-     * Limpa a query do usuário removendo prompts de sistema
-     */
+    // Helper methods para logging
+    
     private String cleanUserQuery(String query) {
         if (query == null || query.trim().isEmpty()) {
             return "[EMPTY_QUERY]";
         }
-        
-        // Se é muito longo e contém markers de sistema, extrair query real
-        if (query.length() > 500 && containsSystemPromptMarkers(query)) {
-            String[] lines = query.split("\n");
-            for (String line : lines) {
-                line = line.trim();
-                if (!line.isEmpty() && 
-                    !line.startsWith("You are") &&
-                    !line.startsWith("AVAILABLE TOOLS") &&
-                    !line.startsWith("INSTRUCTIONS") &&
-                    !line.startsWith("USER QUERY:") &&
-                    !line.contains("Based on your thinking")) {
-                    return line.length() > 200 ? line.substring(0, 200) + "..." : line;
-                }
-            }
-        }
-        
         return query.length() > 200 ? query.substring(0, 200) + "..." : query;
     }
     
-    /**
-     * Limpa resposta removendo informações técnicas
-     */
     private String cleanResponse(String response) {
         if (response == null || response.trim().isEmpty()) {
             return "[EMPTY_RESPONSE]";
         }
-        
-        // Remove calls de função para manter apenas texto da resposta
-        if (response.startsWith("FUNCTION_CALL:") || response.trim().startsWith("[")) {
-            return "[TOOL_CALL_EXECUTED]";
-        }
-        
         return response.length() > 500 ? response.substring(0, 500) + "..." : response;
     }
     
-    /**
-     * Verifica se contém marcadores de prompt de sistema
-     */
-    private boolean containsSystemPromptMarkers(String text) {
-        String[] markers = {
-            "You are", "AVAILABLE TOOLS", "INSTRUCTIONS", "reflection capabilities", 
-            "Based on your thinking", "tool results"
-        };
-        
-        String upperText = text.toUpperCase();
-        for (String marker : markers) {
-            if (upperText.contains(marker.toUpperCase())) {
-                return true;
-            }
+    private String cleanFeedback(String feedback) {
+        if (feedback == null || feedback.trim().isEmpty()) {
+            return "[EMPTY_FEEDBACK]";
         }
-        
-        return false;
-    }
-    
-    @Override
-    public String toString() {
-        return String.format("ReflectionInference{maxIterations=%d, scoreThreshold=%.2f, debug=%s, llm=%s}", 
-                           maxIterations, scoreThreshold, debug, llm.getProviderName());
+        return feedback.length() > 300 ? feedback.substring(0, 300) + "..." : feedback;
     }
 }

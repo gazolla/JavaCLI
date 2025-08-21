@@ -31,7 +31,17 @@ public class ReflectionResult {
         this.needsImprovement = needsImprovement;
     }
     
-    public double getOverallScore() {
+    /**
+     * Construtor simples para compatibilidade
+     */
+    public ReflectionResult(double score, String feedback) {
+        this(score, Map.of(), feedback, List.of(), score < 0.6);
+    }
+    
+    /**
+     * Getter para compatibilidade - retorna o score geral
+     */
+    public double getScore() {
         return overallScore;
     }
     

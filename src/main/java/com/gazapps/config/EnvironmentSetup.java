@@ -13,28 +13,30 @@ import java.util.Scanner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.gazapps.core.ChatEngineBuilder;
+
 public class EnvironmentSetup {
     
     private static final Logger logger = LoggerFactory.getLogger(EnvironmentSetup.class);
     private static Scanner scanner = new Scanner(System.in);
     
     public static class ProviderInfo {
-        public final String name;
+        public final ChatEngineBuilder.LlmProvider provider;
         public final String envKey;
         public final String description;
         
-        public ProviderInfo(String name, String envKey, String description) {
-            this.name = name;
+        public ProviderInfo(ChatEngineBuilder.LlmProvider provider, String envKey, String description) {
+            this.provider = provider;
             this.envKey = envKey;
             this.description = description;
         }
     }
     
     private static final List<ProviderInfo> PROVIDERS = Arrays.asList(
-        new ProviderInfo("Groq", "GROQ_API_KEY", "Fast inference with Llama models"),
-        new ProviderInfo("Gemini", "GEMINI_API_KEY", "Google's latest AI model"),
-        new ProviderInfo("Claude", "ANTHROPIC_API_KEY", "Anthropic's Claude models"),
-        new ProviderInfo("OpenAI", "OPENAI_API_KEY", "GPT models from OpenAI")
+        new ProviderInfo(ChatEngineBuilder.LlmProvider.GROQ, "GROQ_API_KEY", "Fast inference with Llama models"),
+        new ProviderInfo(ChatEngineBuilder.LlmProvider.GEMINI, "GEMINI_API_KEY", "Google's latest AI model"),
+        new ProviderInfo(ChatEngineBuilder.LlmProvider.CLAUDE, "ANTHROPIC_API_KEY", "Anthropic's Claude models"),
+        new ProviderInfo(ChatEngineBuilder.LlmProvider.OPENAI, "OPENAI_API_KEY", "GPT models from OpenAI")
     );
     
     public static boolean ensureApiKeysConfigured() {
@@ -44,7 +46,7 @@ public class EnvironmentSetup {
         checkEnvFile();
         
         // Check which providers are configured
-        List<String> configuredProviders = getConfiguredProviders();
+        List<ChatEngineBuilder.LlmProvider> configuredProviders = getConfiguredProviders();
         
         if (configuredProviders.isEmpty()) {
             logger.warn("❌ No LLM providers configured!");
@@ -72,13 +74,13 @@ public class EnvironmentSetup {
         }
     }
     
-    private static List<String> getConfiguredProviders() {
+    private static List<ChatEngineBuilder.LlmProvider> getConfiguredProviders() {
         return PROVIDERS.stream()
-            .filter(provider -> {
-                String value = System.getenv(provider.envKey);
+            .filter(providerInfo -> {
+                String value = System.getenv(providerInfo.envKey);
                 return value != null && !value.isEmpty() && !value.startsWith("your_");
             })
-            .map(provider -> provider.name.toLowerCase())
+            .map(providerInfo -> providerInfo.provider)
             .toList();
     }
     
@@ -91,18 +93,18 @@ public class EnvironmentSetup {
         Map<String, String> newEnvVars = new HashMap<>();
         boolean hasConfigured = false;
         
-        for (ProviderInfo provider : PROVIDERS) {
-            System.out.printf("Configure %s? (%s)\n", provider.name, provider.description);
+        for (ProviderInfo providerInfo : PROVIDERS) {
+            System.out.printf("Configure %s? (%s)\n", providerInfo.provider.name(), providerInfo.description);
             System.out.print("Enter your API key (or press Enter to skip): ");
             
             String apiKey = scanner.nextLine().trim();
             
             if (!apiKey.isEmpty() && !apiKey.startsWith("your_")) {
-                newEnvVars.put(provider.envKey, apiKey);
-                System.out.printf("✅ %s configured!\n\n", provider.name);
+                newEnvVars.put(providerInfo.envKey, apiKey);
+                System.out.printf("✅ %s configured!\n\n", providerInfo.provider.name());
                 hasConfigured = true;
             } else {
-                System.out.printf("⏭️  Skipped %s\n\n", provider.name);
+                System.out.printf("⏭️  Skipped %s\n\n", providerInfo.provider.name());
             }
         }
         
@@ -170,12 +172,12 @@ public class EnvironmentSetup {
         }
     }
     
-    public static boolean isProviderConfigured(String provider) {
-        String envKey = switch (provider.toLowerCase()) {
-            case "groq" -> "GROQ_API_KEY";
-            case "gemini" -> "GEMINI_API_KEY";
-            case "claude" -> "ANTHROPIC_API_KEY";
-            case "openai" -> "OPENAI_API_KEY";
+    public static boolean isProviderConfigured(ChatEngineBuilder.LlmProvider provider) {
+        String envKey = switch (provider) {
+            case GROQ -> "GROQ_API_KEY";
+            case GEMINI -> "GEMINI_API_KEY";
+            case CLAUDE -> "ANTHROPIC_API_KEY";
+            case OPENAI -> "OPENAI_API_KEY";
             default -> null;
         };
         
@@ -191,29 +193,29 @@ public class EnvironmentSetup {
         return propValue != null && !propValue.isEmpty() && !propValue.startsWith("your_");
     }
     
-    public static boolean setupProviderInline(String provider) {
-        System.out.printf("\n🔧 Setting up %s provider:\n", provider);
+    public static boolean setupProviderInline(ChatEngineBuilder.LlmProvider provider) {
+        System.out.printf("\n🔧 Setting up %s provider:\n", provider.name());
         System.out.print("Enter your API key: ");
         
         String apiKey = scanner.nextLine().trim();
         
         if (!apiKey.isEmpty() && !apiKey.startsWith("your_")) {
-            String envKey = switch (provider.toLowerCase()) {
-                case "groq" -> "GROQ_API_KEY";
-                case "gemini" -> "GEMINI_API_KEY";
-                case "claude" -> "ANTHROPIC_API_KEY";
-                case "openai" -> "OPENAI_API_KEY";
+            String envKey = switch (provider) {
+                case GROQ -> "GROQ_API_KEY";
+                case GEMINI -> "GEMINI_API_KEY";
+                case CLAUDE -> "ANTHROPIC_API_KEY";
+                case OPENAI -> "OPENAI_API_KEY";
                 default -> null;
             };
             
             if (envKey != null) {
                 System.setProperty(envKey, apiKey);
-                System.out.printf("✅ %s configured for current session!\n", provider);
+                System.out.printf("✅ %s configured for current session!\n", provider.name());
                 return true;
             }
         }
         
-        System.out.printf("❌ Failed to configure %s\n", provider);
+        System.out.printf("❌ Failed to configure %s\n", provider.name());
         return false;
     }
     

@@ -9,6 +9,7 @@ import com.gazapps.inference.simple.SimpleInference;
 import com.gazapps.llm.Llm;
 import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.MCPServers;
+import com.gazapps.core.ChatEngineBuilder.InferenceStrategy;
 
 
 public final class InferenceFactory {
@@ -91,4 +92,14 @@ public final class InferenceFactory {
         
         return new SimpleInference(llmService, mcpService, mcpServers, options);
     }
+
+    public static Inference createInference(InferenceStrategy strategy, Llm llmService, MCPService mcpService, MCPServers mcpServers,
+			Map<String, Object> defaultOptions) {
+		return switch (strategy) {
+		    case REACT -> createReAct(llmService, mcpService, mcpServers, defaultOptions);
+            case REFLECTION -> createReflection(llmService, mcpService, mcpServers, defaultOptions);
+            case SIMPLE -> createSimple(llmService, mcpService, mcpServers, defaultOptions);
+            default -> throw new IllegalArgumentException("Inference strategy '" + strategy + "' não encontrada.");
+		};
+	}
 }

@@ -72,16 +72,29 @@ public class RuntimeConfigManager {
     }
     
     public ChatEngine createChatEngine() throws Exception {
-        return ChatEngineBuilder.currentSetup(currentProvider, currentStrategy);
+        // Criar o LLM primeiro
+        Llm llmService = createLlmService(currentProvider);
+        return ChatEngineBuilder.currentSetup(currentProvider, currentStrategy, llmService);
     }
     
     public ChatEngine createChatEngine(LlmProvider provider, InferenceStrategy strategy) throws Exception {
-        return ChatEngineBuilder.currentSetup(provider, strategy);
+        // Criar o LLM primeiro
+        Llm llmService = createLlmService(provider);
+        return ChatEngineBuilder.currentSetup(provider, strategy, llmService);
+    }
+    
+    private Llm createLlmService(LlmProvider provider) {
+        return switch (provider) {
+            case GEMINI -> com.gazapps.llm.LlmBuilder.gemini(null);
+            case GROQ -> com.gazapps.llm.LlmBuilder.groq(null);
+            case OPENAI -> com.gazapps.llm.LlmBuilder.openai(null);
+            case CLAUDE -> com.gazapps.llm.LlmBuilder.claude(null);
+        };
     }
     
     public boolean isProviderAvailable(LlmProvider provider) {
         Config config = new Config();
-        return config.isLlmConfigValid(provider.name().toLowerCase());
+        return config.isLlmConfigValid(provider);
     }
     
     public void cacheConfig(String key, Object value) {
@@ -164,7 +177,7 @@ public class RuntimeConfigManager {
         
         try {
             // Test basic functionality
-            String llmProvider = chatEngine.getLLMService().getProviderName();
+            String llmProvider = chatEngine.getLLMService().getProviderName().toString();
             String inferenceStrategy = chatEngine.getInference().getClass().getSimpleName();
             
             logger.info("Configuration validated - LLM: {}, Inference: {}", llmProvider, inferenceStrategy);
@@ -184,7 +197,7 @@ public class RuntimeConfigManager {
             summary.append("═══════════════════════════\n");
             
             if (chatEngine != null) {
-                String llmProvider = chatEngine.getLLMService().getProviderName();
+                String llmProvider = chatEngine.getLLMService().getProviderName().toString();
                 String inferenceStrategy = chatEngine.getInference().getClass().getSimpleName();
                 
                 summary.append(String.format("🤖 LLM Provider: %s\n", llmProvider));

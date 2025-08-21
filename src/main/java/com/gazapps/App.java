@@ -40,7 +40,9 @@ public class App implements AutoCloseable {
     private RuntimeConfigManager configManager;
 
     public App() throws Exception {
-        initialize(ChatEngineBuilder.currentSetup(llm, inference));
+        // Criar LLM primeiro
+        com.gazapps.llm.Llm llmService = com.gazapps.llm.LlmBuilder.groq(null);
+        initialize(ChatEngineBuilder.currentSetup(llm, inference, llmService));
     }
     
     public App(ChatEngine chatEngine) {

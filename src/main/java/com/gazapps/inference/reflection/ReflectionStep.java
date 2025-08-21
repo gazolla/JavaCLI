@@ -19,6 +19,10 @@ public class ReflectionStep {
     private final int iteration;
     private final long timestamp;
     
+    public ReflectionStep(StepType type, String content, double score) {
+        this(type, content, null, (int) Math.round(score));
+    }
+    
     public ReflectionStep(StepType type, String content, int iteration) {
         this(type, content, null, iteration);
     }

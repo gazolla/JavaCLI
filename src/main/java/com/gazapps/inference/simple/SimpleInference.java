@@ -4,15 +4,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gazapps.config.Config;
+import com.gazapps.core.ChatEngineBuilder;
 import com.gazapps.inference.Inference;
 import com.gazapps.llm.Llm;
+import com.gazapps.llm.LlmResponse;
+import com.gazapps.llm.tool.ToolDefinition;
 import com.gazapps.mcp.MCPInfo;
 import com.gazapps.mcp.MCPService;
 import com.gazapps.mcp.MCPServers;
@@ -22,14 +24,8 @@ import com.gazapps.mcp.ToolManager.ToolOperationResult;
 import io.modelcontextprotocol.spec.McpSchema.Tool;
 
 /**
- * SimpleInference - A streamlined, efficient inference system that demonstrates
- * how intelligent combination of existing MCPInfo capabilities with simple tool
- * selection logic and configurable prompts can deliver superior results with
- * minimal code and configuration.
- * 
- * This implementation proves that well-executed simplicity outperforms 
- * unnecessary complexity by leveraging the MCPInfo reverse mapping system
- * and Config infrastructure to create a performant, maintainable solution.
+ * SimpleInference refatorada para usar a nova interface Llm.
+ * Remove todo acoplamento específico com implementações de LLM.
  */
 public class SimpleInference implements Inference {
 
@@ -50,8 +46,7 @@ public class SimpleInference implements Inference {
     private Object conversationMemory;
 
     /**
-     * Constructs SimpleInference following the standard pattern, receiving 
-     * all required dependencies and loading configuration from properties.
+     * Constructs SimpleInference seguindo o padrão refatorado.
      */
     public SimpleInference(Llm llmService, MCPService mcpService, MCPServers mcpServers, Map<String, Object> options) {
         this.llmService = Objects.requireNonNull(llmService, "LLM service is required");
@@ -62,7 +57,7 @@ public class SimpleInference implements Inference {
         this.config = new Config();
         this.toolManager = new ToolManager(mcpInfo, mcpServers);
         
-        // Load configuration from properties using Properties directly
+        // Load configuration from properties
         this.maxTools = Integer.parseInt(getConfigProperty("simple.max.tools", "5"));
         this.debug = Boolean.parseBoolean(getConfigProperty("simple.debug", "true"));
         this.systemPromptTemplate = getConfigProperty("simple.prompt.system", 
@@ -71,13 +66,14 @@ public class SimpleInference implements Inference {
             "Based on the tool execution:\n\nTool: {TOOL_NAME}\nResult: {RESULT}\n\nUser Query: {QUERY}\n\nProvide a comprehensive response incorporating the tool result.");
         
         if (debug) {
-            logger.info("[SIMPLE] Initialized with maxTools={}, debug={}", maxTools, debug);
+            logger.info("[SIMPLE] Initialized with LLM provider: {}, capabilities: {}", 
+                       llmService.getProviderName(), llmService.getCapabilities());
         }
     }
 
     @Override
-    public String getStrategyName() {
-        return "simple";
+    public ChatEngineBuilder.InferenceStrategy getStrategyName() {
+        return ChatEngineBuilder.InferenceStrategy.SIMPLE;
     }
     
     public void setConversationMemory(Object memory) {
@@ -86,39 +82,49 @@ public class SimpleInference implements Inference {
 
     @Override
     public String processQuery(String query) {
-        // Log da query inicial do usuário
         conversationLogger.info("USER: {}", cleanUserQuery(query));
         
         if (debug) {
-            logger.info("[SIMPLE] Processing query: {}", query);
+            logger.info("[SIMPLE] Processing query with {}: {}", llmService.getProviderName(), query);
         }
 
         try {
-            // Step 1: Get all available tools
-            List<Tool> allTools = mcpInfo.listAllTools();
+            // Step 1: Get all available tools and convert to ToolDefinition
+            List<Tool> allMcpTools = mcpInfo.listAllTools();
+            List<ToolDefinition> toolDefinitions = llmService.convertMcpTools(allMcpTools);
+            
             if (debug) {
-                logger.info("[SIMPLE] Found {} total tools", allTools.size());
+                logger.info("[SIMPLE] Found {} tools, converted to {} ToolDefinitions", 
+                           allMcpTools.size(), toolDefinitions.size());
             }
 
-            // Single LLM call using ToolManager
+            // Step 2: Single LLM call using new interface
             String analysisPrompt = buildAnalysisPrompt(query, toolManager.getAvailableTools());
-            String llmResponse = llmService.generateResponse(analysisPrompt, null);
             
-            // Log da análise
-            conversationLogger.info("ANALYSIS: {}", cleanAnalysis(llmResponse));
+            // Use generateResponse since we're not using tools in analysis phase
+            LlmResponse llmResponse = llmService.generateResponse(analysisPrompt);
+            
+            if (!llmResponse.isSuccess()) {
+                String errorMsg = "LLM analysis failed: " + llmResponse.getErrorMessage();
+                conversationLogger.info("ERROR: {}", errorMsg);
+                return errorMsg;
+            }
+            
+            String analysisResult = llmResponse.getContent();
+            conversationLogger.info("ANALYSIS: {}", cleanAnalysis(analysisResult));
             
             if (debug) {
-                logger.info("[SIMPLE] LLM analysis response: {}", llmResponse);
+                logger.info("[SIMPLE] LLM analysis response: {}", analysisResult);
             }
 
             // Step 3: Parse response - KISS format
-            if (llmResponse.startsWith("TOOL:")) {
+            if (analysisResult.startsWith("TOOL:")) {
                 // Execute tool and generate contextualized response
-                return executeToolAndRespond(llmResponse, query);
+                return executeToolAndRespond(analysisResult, query);
             } else {
                 // Direct response - no tools needed
-                conversationLogger.info("ASSISTANT: {}", cleanResponse(llmResponse));
-                return llmResponse;
+                conversationLogger.info("ASSISTANT: {}", cleanResponse(analysisResult));
+                return analysisResult;
             }
 
         } catch (Exception e) {
@@ -186,7 +192,7 @@ public class SimpleInference implements Inference {
     }
     
     /**
-     * KISS: Execute tool and respond in one method
+     * KISS: Execute tool and respond in one method using new LLM interface
      */
     private String executeToolAndRespond(String toolResponse, String originalQuery) {
         try {
@@ -197,7 +203,6 @@ public class SimpleInference implements Inference {
             
             Map<String, Object> args = objectMapper.readValue(argsJson, Map.class);
             
-            // Log da execução da ferramenta
             conversationLogger.info("TOOL_CALL: {}({})", toolName, formatArgs(args));
             
             if (debug) {
@@ -217,30 +222,34 @@ public class SimpleInference implements Inference {
             }
             
             String toolResult = result.getResult();
-            
-            // Log do resultado da ferramenta
             conversationLogger.info("TOOL_RESULT: {}", cleanToolResult(toolResult));
             
             if (debug) {
                 logger.info("[SIMPLE] Tool result: {}", toolResult);
             }
             
-            // Generate contextualized response
+            // Generate contextualized response using new LLM interface
             String finalPrompt = toolPromptTemplate
                 .replace("{TOOL_NAME}", toolName)
                 .replace("{RESULT}", toolResult)
                 .replace("{QUERY}", originalQuery);
                 
-            String finalResponse = llmService.generateResponse(finalPrompt, null);
+            LlmResponse finalResponse = llmService.generateResponse(finalPrompt);
             
-            // Log da resposta final
-            conversationLogger.info("ASSISTANT: {}", cleanResponse(finalResponse));
-            
-            if (debug) {
-                logger.info("[SIMPLE] Final response: {}", finalResponse);
+            if (!finalResponse.isSuccess()) {
+                String errorMsg = "Failed to generate final response: " + finalResponse.getErrorMessage();
+                conversationLogger.info("ERROR: {}", errorMsg);
+                return errorMsg;
             }
             
-            return finalResponse;
+            String responseContent = finalResponse.getContent();
+            conversationLogger.info("ASSISTANT: {}", cleanResponse(responseContent));
+            
+            if (debug) {
+                logger.info("[SIMPLE] Final response: {}", responseContent);
+            }
+            
+            return responseContent;
             
         } catch (Exception e) {
             String errorMsg = "Tool execution failed: " + e.getMessage();
@@ -254,7 +263,6 @@ public class SimpleInference implements Inference {
 
     @Override
     public String buildSystemPrompt() {
-        // KISS: Use ToolManager for available tools
         return buildAnalysisPrompt("[System Prompt]", toolManager.getAvailableTools());
     }
 
@@ -263,26 +271,20 @@ public class SimpleInference implements Inference {
         // No resources to close in this simple implementation
     }
     
-    /**
-     * Limpa a query do usuário removendo prompts de sistema
-     */
+    // Helper methods for logging (unchanged)
+    
     private String cleanUserQuery(String query) {
         if (query == null || query.trim().isEmpty()) {
             return "[EMPTY_QUERY]";
         }
-        
         return query.length() > 200 ? query.substring(0, 200) + "..." : query;
     }
     
-    /**
-     * Limpa a análise da LLM
-     */
     private String cleanAnalysis(String analysis) {
         if (analysis == null || analysis.trim().isEmpty()) {
             return "[EMPTY_ANALYSIS]";
         }
         
-        // Se é uma chamada de ferramenta, simplifica
         if (analysis.startsWith("TOOL:")) {
             return "Need to use tool";
         }
@@ -290,9 +292,6 @@ public class SimpleInference implements Inference {
         return analysis.length() > 300 ? analysis.substring(0, 300) + "..." : analysis;
     }
     
-    /**
-     * Limpa resposta removendo informações técnicas
-     */
     private String cleanResponse(String response) {
         if (response == null || response.trim().isEmpty()) {
             return "[EMPTY_RESPONSE]";
@@ -301,9 +300,6 @@ public class SimpleInference implements Inference {
         return response.length() > 500 ? response.substring(0, 500) + "..." : response;
     }
     
-    /**
-     * Limpa resultado de ferramenta
-     */
     private String cleanToolResult(String result) {
         if (result == null || result.trim().isEmpty()) {
             return "[EMPTY_RESULT]";
@@ -312,9 +308,6 @@ public class SimpleInference implements Inference {
         return result.length() > 400 ? result.substring(0, 400) + "..." : result;
     }
     
-    /**
-     * Formata argumentos para log
-     */
     private String formatArgs(Map<String, Object> args) {
         if (args == null || args.isEmpty()) {
             return "{}";
@@ -328,11 +321,10 @@ public class SimpleInference implements Inference {
     }
 
     /**
-     * Helper method to access Config properties using reflection to access the private getProperty method.
+     * Helper method to access Config properties using reflection.
      */
     private String getConfigProperty(String key, String defaultValue) {
         try {
-            // Access the private properties field
             java.lang.reflect.Field propertiesField = config.getClass().getDeclaredField("properties");
             propertiesField.setAccessible(true);
             java.util.Properties properties = (java.util.Properties) propertiesField.get(config);

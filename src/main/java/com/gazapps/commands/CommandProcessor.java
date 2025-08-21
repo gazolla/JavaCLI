@@ -13,6 +13,7 @@ import com.gazapps.config.EnvironmentSetup;
 import com.gazapps.config.RuntimeConfigManager;
 import com.gazapps.core.ChatEngine;
 import com.gazapps.core.ChatEngineBuilder;
+import com.gazapps.core.ChatEngineBuilder.LlmProvider;
 import com.gazapps.mcp.MCPServers;
 
 import io.modelcontextprotocol.client.McpSyncClient;
@@ -23,7 +24,6 @@ public class CommandProcessor {
     private static final Pattern COMMAND_PATTERN = Pattern.compile("^/(\\w+)(?:\\s+(.+))?$");
     
     private static final Set<String> VALID_LLM_PROVIDERS = Set.of("groq", "gemini", "claude", "openai");
-    private static final Set<String> VALID_INFERENCE_STRATEGIES = Set.of("simple", "react", "reflection");
     
     private static final String WORKSPACE_HELP = """
         Available commands:
@@ -89,17 +89,11 @@ public class CommandProcessor {
         
         provider = provider.trim().toLowerCase();
         
-        if (!VALID_LLM_PROVIDERS.contains(provider)) {
-            return CommandResult.error(String.format("""
-                ❌ Unknown LLM provider '%s'
-                Available providers: groq, gemini, claude, openai
-                Usage: /llm <provider>""", provider));
-        }
-        
         try {
-            if (!EnvironmentSetup.isProviderConfigured(provider)) {
+        	 var p = LlmProvider.fromString(provider);
+            if (!EnvironmentSetup.isProviderConfigured(p)) {
                 logger.info("Provider {} not configured, offering inline setup", provider);
-                if (!EnvironmentSetup.setupProviderInline(provider)) {
+                if (!EnvironmentSetup.setupProviderInline(p)) {
                     return CommandResult.error("❌ Configuration cancelled. Cannot switch to " + provider + ".");
                 }
             }
@@ -144,13 +138,6 @@ public class CommandProcessor {
         
         strategy = strategy.trim().toLowerCase();
         
-        if (!VALID_INFERENCE_STRATEGIES.contains(strategy)) {
-            return CommandResult.error(String.format("""
-                ❌ Unknown inference strategy '%s'
-                Available strategies: sequential, react, tooluse, reflection
-                Usage: /inference <strategy>""", strategy));
-        }
-        
         try {
             logger.info("Attempting to change inference to: {}", strategy);
             ChatEngineBuilder.InferenceStrategy inferenceStrategy = 
@@ -164,6 +151,11 @@ public class CommandProcessor {
             
             updateChatEngine(newEngine);
             return createInferenceSuccessResponse(inferenceStrategy);
+        } catch (IllegalArgumentException e) {
+            return CommandResult.error(String.format("""
+                ❌ Unknown inference strategy '%s'
+                Available strategies: simple, react, reflection
+                Usage: /inference <strategy>""", strategy));
         } catch (Exception e) {
             logger.error("Inference change failed", e);
             return CommandResult.error("❌ Failed to change inference to " + strategy + ": " + e.getMessage());
@@ -196,7 +188,7 @@ public class CommandProcessor {
     
     private CommandResult handleStatusCommand() {
         try {
-            String llmProvider = currentChatEngine.getLLMService().getProviderName();
+            String llmProvider = currentChatEngine.getLLMService().toString();
             String inferenceStrategy = currentChatEngine.getInference().getClass().getSimpleName();
             int memorySize = currentChatEngine.getMemory().getRecentMessages().size();
             
@@ -293,7 +285,8 @@ public class CommandProcessor {
                     💡 Why restart? MCP servers load workspace at startup and need
                        to be reinitialized to access the new folder.
                     
-                    🚀 Just close and run JavaCLI again - your settings are saved!""") :
+                    🚀 Just close and run JavaCLI again - your settings are saved!
+                    """) :
                 CommandResult.error("❌ Workspace setup cancelled or failed.");
         } catch (Exception e) {
             logger.error("Workspace setup failed", e);
@@ -358,7 +351,7 @@ public class CommandProcessor {
                  Example: /llm groq
                
                /inference <strategy>  - Change inference strategy  
-                 Strategies: sequential, react, tooluse, reflection
+                 Strategies: simple, react, reflection
                  Example: /inference react
                
                /workspace [command]   - Manage MCP workspace

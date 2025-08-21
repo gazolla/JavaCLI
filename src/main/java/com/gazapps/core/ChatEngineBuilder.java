@@ -10,6 +10,10 @@ import com.gazapps.inference.InferenceFactory;
 import com.gazapps.llm.Llm;
 import com.gazapps.llm.LlmBuilder;
 
+/**
+ * ChatEngineBuilder refatorado para trabalhar apenas com a interface Llm.
+ * Remove conhecimento de implementações específicas de LLM.
+ */
 public class ChatEngineBuilder {
 
     private static final Logger logger = LoggerFactory.getLogger(ChatEngineBuilder.class);
@@ -18,16 +22,15 @@ public class ChatEngineBuilder {
     private Inference inference;
     private ConversationMemory memory;
     private final com.gazapps.mcp.MCPService mcpService;
-	private final com.gazapps.mcp.MCPServers mcpServers;
+    private final com.gazapps.mcp.MCPServers mcpServers;
   
     public com.gazapps.mcp.MCPServers getMcpServers() {
-		return mcpServers;
-	}
+        return mcpServers;
+    }
 
-	public com.gazapps.mcp.MCPService getMcpService() {
-		return mcpService;
-	}
-
+    public com.gazapps.mcp.MCPService getMcpService() {
+        return mcpService;
+    }
     
     public enum LlmProvider {
         GEMINI,
@@ -42,7 +45,7 @@ public class ChatEngineBuilder {
                     return provider;
                 }
             }
-            throw new IllegalArgumentException("invalid Value: " + value);
+            throw new IllegalArgumentException("Invalid LLM Provider: " + value);
         }
     }
     
@@ -51,17 +54,16 @@ public class ChatEngineBuilder {
         REACT,
         REFLECTION;
     	
-	  public static InferenceStrategy fromString(String value) {
-          if (value == null) return null;
-          for (InferenceStrategy strategy : InferenceStrategy.values()) {
-              if (strategy.name().equalsIgnoreCase(value.trim())) {
-                  return strategy;
-              }
-          }
-          throw new IllegalArgumentException("invalid Value: " + value);
-      }
+        public static InferenceStrategy fromString(String value) {
+            if (value == null) return null;
+            for (InferenceStrategy strategy : InferenceStrategy.values()) {
+                if (strategy.name().equalsIgnoreCase(value.trim())) {
+                    return strategy;
+                }
+            }
+            throw new IllegalArgumentException("Invalid Inference Strategy: " + value);
+        }
     }
-    
 
     private ChatEngineBuilder() {
         try {
@@ -80,14 +82,63 @@ public class ChatEngineBuilder {
         return new ChatEngineBuilder();
     }
     
+
     public ChatEngineBuilder llm(Llm llmService) {
         this.llmService = llmService;
         return this;
     }
     
+
+    public ChatEngineBuilder llm(LlmProvider provider, String apiKey) {
+        switch (provider) {
+            case GEMINI:
+                this.llmService = LlmBuilder.createGemini(apiKey);
+                break;
+            case GROQ:
+                this.llmService = LlmBuilder.createGroq(apiKey);
+                break;
+            case CLAUDE:
+                this.llmService = LlmBuilder.createClaude(apiKey);
+                break;
+            case OPENAI:
+                this.llmService = LlmBuilder.createOpenAI(apiKey);
+                break;
+            default:
+                throw new IllegalArgumentException("Provider não suportado: " + provider);
+        }
+        return this;
+    }
+    
+ 
+    public ChatEngineBuilder llm(String providerName, String apiKey) {
+        LlmProvider provider = LlmProvider.fromString(providerName);
+        return llm(provider, apiKey);
+    }
+    
     public ChatEngineBuilder inference(Inference inference) {
         this.inference = inference;
         return this;
+    }
+    
+    public ChatEngineBuilder inference(InferenceStrategy strategy, Map<String, Object> options) {
+        if (llmService == null) {
+            throw new IllegalStateException("LLM deve ser configurado antes da inferência");
+        }
+        
+        this.inference = InferenceFactory.createInference(
+            strategy, 
+            llmService, 
+            mcpService, 
+            mcpServers, 
+            options
+        );
+        return this;
+    }
+    
+
+    public ChatEngineBuilder inference(String strategyName, Map<String, Object> options) {
+        InferenceStrategy strategy = InferenceStrategy.fromString(strategyName);
+        return inference(strategy, options);
     }
     
     public ChatEngineBuilder memory(ConversationMemory memory) {
@@ -96,100 +147,81 @@ public class ChatEngineBuilder {
     }
     
     public ChatEngine build() {
-        if (llmService == null) {
-            throw new IllegalArgumentException("LLMService é obrigatório");
-        }
-        
-        if (inference == null) {
-            throw new IllegalArgumentException("Inference é obrigatório");
-        }
+        validateConfiguration();
         
         if (memory == null) {
             memory = new InMemoryConversationMemory();
         }
         
-        logger.info(this.toString());
+        if (inference == null) {
+            Map<String, Object> defaultOptions = Map.of("debug", false);
+            inference = InferenceFactory.createInference(
+                InferenceStrategy.SIMPLE, 
+                llmService, 
+                mcpService, 
+                mcpServers, 
+                defaultOptions
+            );
+        }
         
-        return new ChatEngine(llmService, inference, memory, mcpServers);
+        ChatEngine engine = new ChatEngine(llmService, inference, memory, mcpService, mcpServers);
+        
+        logger.info("ChatEngine built successfully with LLM: {}, Inference: {}", 
+                   llmService.getProviderName(), inference.getStrategyName());
+        
+        return engine;
     }
     
+    private void validateConfiguration() {
+        if (llmService == null) {
+            throw new IllegalArgumentException("LLM é obrigatório");
+        }
 
-    private static ChatEngine setup(LlmProvider provider, InferenceStrategy strategy, 
-                                 Map<String, Object> inferenceParams) {
-        ChatEngineBuilder builder = create();
+        if (!llmService.isHealthy()) {
+            logger.warn("LLM {} pode não estar funcionando corretamente", llmService.getProviderName());
+        }
         
-        try {
-            Llm llmService = switch (provider) {
-                case GEMINI -> LlmBuilder.gemini(null);
-                case GROQ -> LlmBuilder.groq(null);
-                case OPENAI -> LlmBuilder.openai(null);
-                case CLAUDE -> LlmBuilder.claude(null);
-            };
-            
-            Inference inference = createInference(strategy, llmService, 
-                                                 builder.mcpService, builder.mcpServers, 
-                                                 inferenceParams);
-            
-            return builder
-                    .llm(llmService)
-                    .inference(inference)
-                    .build();
-                    
-        } catch (Exception e) {
-            throw new RuntimeException("Erro ao criar configuração: " + e.getMessage(), e);
+        if (mcpService == null) {
+            throw new IllegalArgumentException("MCPService é obrigatório");
+        }
+        
+        if (mcpServers == null) {
+            throw new IllegalArgumentException("MCPServers é obrigatório");
         }
     }
     
-    private static Inference createInference(InferenceStrategy strategy, Llm llmService, 
-                                           com.gazapps.mcp.MCPService mcpService, 
-                                           com.gazapps.mcp.MCPServers mcpServers,
-                                           Map<String, Object> params) {
-        return switch (strategy) {
-            case SIMPLE -> InferenceFactory.createSimple(llmService, mcpService, mcpServers);
-            case REACT -> InferenceFactory.createReAct(llmService, mcpService, mcpServers, 
-                             params != null ? params : Map.of("maxIterations", 5, "debug", true));
-            case REFLECTION -> InferenceFactory.createReflection(llmService, mcpService, mcpServers,
-                             params != null ? params : Map.of("maxIterations", 3, "debug", true));
-        };
+    /**
+     * Método utilitário para criar um ChatEngine com configuração mínima.
+     */
+    public static ChatEngine createSimple(LlmProvider provider, String apiKey) {
+        return create()
+            .llm(provider, apiKey)
+            .inference(InferenceStrategy.SIMPLE, Map.of("debug", false))
+            .memory(new InMemoryConversationMemory())
+            .build();
     }
     
-
-    public static ChatEngine currentSetup(LlmProvider provider) {
-        return currentSetup(provider, InferenceStrategy.SIMPLE);
-    }
-    
-    public static ChatEngine currentSetup(LlmProvider provider, InferenceStrategy strategy) {
-        return setup(provider, strategy, null);
-    }
-    
-    public static ChatEngine reactSetup(LlmProvider provider) {
-        return setup(provider, InferenceStrategy.REACT, null);
-    }
-    
-    public static ChatEngine reactSetup(LlmProvider provider, int maxIterations) {
-        return setup(provider, InferenceStrategy.REACT, 
-                   Map.of("maxIterations", maxIterations, "debug", true));
-    }
-    
-    public static ChatEngine reflectionSetup(LlmProvider provider) {
-        return setup(provider, InferenceStrategy.REFLECTION, null);
-    }
-    
-    public static ChatEngine reflectionSetup(LlmProvider provider, int maxIterations) {
-        return setup(provider, InferenceStrategy.REFLECTION, 
-                   Map.of("maxIterations", maxIterations, "debug", true));
-    }
-    
-    public static ChatEngine reflectionDebugSetup(LlmProvider provider, int maxIterations, boolean debug) {
-        return setup(provider, InferenceStrategy.REFLECTION, 
-                   Map.of("maxIterations", maxIterations, "debug", debug));
+    /**
+     * Método utilitário para criar um ChatEngine com configuração mínima usando strings.
+     */
+    public static ChatEngine createSimple(String providerName, String apiKey) {
+        LlmProvider provider = LlmProvider.fromString(providerName);
+        return createSimple(provider, apiKey);
     }
     
     @Override
     public String toString() {
-        return String.format("ChatEngineBuilder{llmService=%s, inference=%s, memory=%s}",
-                llmService != null ? llmService.getProviderName() : "null",
-                inference != null ? inference.getClass().getSimpleName() : "null",
-                memory != null ? memory.getClass().getSimpleName() : "default");
+        return String.format("ChatEngineBuilder{llm=%s, inference=%s, memory=%s}", 
+                           llmService != null ? llmService.getProviderName() : "null",
+                           inference != null ? inference.getStrategyName() : "null",
+                           memory != null ? memory.getClass().getSimpleName() : "null");
     }
+
+	public static ChatEngine currentSetup(LlmProvider currentProvider, InferenceStrategy currentStrategy, Llm llmService) {
+		return create()
+				.llm(llmService)
+				.inference(currentStrategy, Map.of("debug", false))
+				.memory(new InMemoryConversationMemory())
+	            .build();
+	}
 }
